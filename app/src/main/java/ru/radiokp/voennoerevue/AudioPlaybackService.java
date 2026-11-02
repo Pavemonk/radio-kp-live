@@ -34,7 +34,9 @@ import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
 
@@ -44,6 +46,7 @@ public final class AudioPlaybackService extends Service {
     public static final String ACTION_STOP = "ru.radiokp.voennoerevue.STOP";
     public static final String ACTION_SET_QUALITY = "ru.radiokp.voennoerevue.SET_QUALITY";
     public static final String EXTRA_URL = "stream_url";
+    public static final String EXTRA_URL_CANDIDATES = "stream_url_candidates";
     public static final String EXTRA_REFERER = "referer";
     public static final String EXTRA_SOURCE_NAME = "source_name";
     public static final String EXTRA_MAX_AUDIO_BITRATE = "max_audio_bitrate_kbps";
@@ -67,6 +70,7 @@ public final class AudioPlaybackService extends Service {
     private ExoPlayer player;
     private DefaultTrackSelector trackSelector;
     private String currentUrl = "";
+    private ArrayList<String> currentCandidateUrls = new ArrayList<>();
     private String currentReferer = "https://vkvideo.ru/";
     private String currentSourceName = "Радио КП";
     private boolean currentIsMp3 = false;
@@ -81,9 +85,14 @@ public final class AudioPlaybackService extends Service {
 
     private static final class AudioPlaylistResolution {
         final String url;
+        final String fallbackUrl;
         final String status;
         AudioPlaylistResolution(String url, String status) {
+            this(url, null, status);
+        }
+        AudioPlaylistResolution(String url, String fallbackUrl, String status) {
             this.url = url;
+            this.fallbackUrl = fallbackUrl;
             this.status = status;
         }
     }
@@ -145,6 +154,17 @@ public final class AudioPlaybackService extends Service {
             String sourceName = intent.getStringExtra(EXTRA_SOURCE_NAME);
             int quality = intent.getIntExtra(EXTRA_MAX_AUDIO_BITRATE, maxAudioBitrateKbps);
             boolean isMp3 = intent.getBooleanExtra(EXTRA_IS_MP3, false);
+            ArrayList<String> suppliedCandidates = intent.getStringArrayListExtra(EXTRA_URL_CANDIDATES);
+            currentCandidateUrls = new ArrayList<>();
+            if (suppliedCandidates != null) {
+                for (String candidate : suppliedCandidates) {
+                    if (currentCandidateUrls.size() >= 8) break;
+                    if (isAllowedStream(candidate, false) && !currentCandidateUrls.contains(candidate)) {
+                        currentCandidateUrls.add(candidate);
+                    }
+                }
+            }
+            if (!isMp3 && currentCandidateUrls.isEmpty() && isAllowedStream(url, false)) currentCandidateUrls.add(url);
             if (!isAllowedStream(url, isMp3)) {
                 notifyListener(false, "SOURCE_ERROR: недопустимый адрес потока");
                 return START_NOT_STICKY;
@@ -214,16 +234,18 @@ public final class AudioPlaybackService extends Service {
         audioModeStatus = "Проверяю структуру HLS…";
         notifyListener(false, "Проверяю HLS: ищу отдельный аудиопоток…");
         Thread resolver = new Thread(() -> {
-            AudioPlaylistResolution resolution = resolveAudioOnlyPlaylist(url);
+            AudioPlaylistResolution resolution = resolveAudioOnlyPlaylists(url);
             handler.post(() -> {
                 if (generation != streamGeneration || player == null || !url.equals(currentUrl)) return;
                 audioModeStatus = resolution.status;
                 if (resolution.url != null && !resolution.url.isEmpty()) {
                     usingAudioOnlyHls = true;
-                    notifyListener(false, resolution.status + " — запускаю аудио без видеопотока…");
+                    fallbackHlsUrl = resolution.fallbackUrl == null ? url : resolution.fallbackUrl;
+                    notifyListener(false, resolution.status + " — запускаю отдельный аудиопоток…");
                     startHlsPlayback(resolution.url, generation);
                 } else {
                     usingAudioOnlyHls = false;
+                    fallbackHlsUrl = "";
                     notifyListener(false, resolution.status + " — запускаю исходный HLS…");
                     startHlsPlayback(url, generation);
                 }
@@ -287,7 +309,34 @@ public final class AudioPlaybackService extends Service {
      * Reads only the small HLS manifest. If it exposes a distinct AUDIO rendition
      * or an audio-only variant, return that playlist; otherwise use the original.
      */
-    private AudioPlaylistResolution resolveAudioOnlyPlaylist(String manifestUrl) {
+    private AudioPlaylistResolution resolveAudioOnlyPlaylists(String primaryUrl) {
+        LinkedHashSet<String> candidates = new LinkedHashSet<>();
+        if (currentCandidateUrls != null) {
+            for (String candidate : currentCandidateUrls) {
+                if (candidates.size() >= 8) break;
+                if (isAllowedStream(candidate, false)) candidates.add(candidate);
+            }
+        }
+        if (isAllowedStream(primaryUrl, false)) candidates.add(primaryUrl);
+        if (candidates.isEmpty()) candidates.add(primaryUrl);
+
+        int checked = 0;
+        String firstFailure = null;
+        for (String candidate : candidates) {
+            checked++;
+            AudioPlaylistResolution result = resolveAudioOnlyPlaylistCandidate(candidate);
+            if (result.url != null && !result.url.isEmpty()) {
+                return new AudioPlaylistResolution(result.url, candidate,
+                        "Проверено " + checked + " из " + candidates.size() + " HLS-вариантов: " + result.status);
+            }
+            if (firstFailure == null) firstFailure = result.status;
+        }
+        String detail = firstFailure == null ? "не удалось прочитать манифесты" : firstFailure;
+        return new AudioPlaylistResolution(null, primaryUrl,
+                "Проверено " + checked + " HLS-вариант(ов); отдельный аудиопоток не найден (" + detail + ")");
+    }
+
+    private AudioPlaylistResolution resolveAudioOnlyPlaylistCandidate(String manifestUrl) {
         HttpURLConnection connection = null;
         try {
             URL url = new URL(manifestUrl);
