@@ -76,7 +76,17 @@ public final class AudioPlaybackService extends Service {
     private int streamGeneration = 0;
     private String fallbackHlsUrl = "";
     private boolean usingAudioOnlyHls = false;
+    private String audioModeStatus = "";
     private PlaybackStateListener listener;
+
+    private static final class AudioPlaylistResolution {
+        final String url;
+        final String status;
+        AudioPlaylistResolution(String url, String status) {
+            this.url = url;
+            this.status = status;
+        }
+    }
 
     private final Runnable connectionTimeout = () -> {
         if (player != null && !currentUrl.isEmpty() && player.getPlaybackState() == Player.STATE_BUFFERING) {
@@ -101,10 +111,7 @@ public final class AudioPlaybackService extends Service {
         player.addListener(new Player.Listener() {
             @Override public void onIsPlayingChanged(boolean isPlaying) {
                 updateNotification();
-                notifyListener(isPlaying, isPlaying
-                        ? "Идёт эфир · " + currentSourceName
-                        : (player != null && player.getPlaybackState() == Player.STATE_BUFFERING
-                            ? "Подключение к " + currentSourceName + "…" : "Пауза · " + currentSourceName));
+                notifyListener(isPlaying, playbackStatusMessage(isPlaying));
             }
 
             @Override public void onPlaybackStateChanged(int state) {
@@ -114,8 +121,7 @@ public final class AudioPlaybackService extends Service {
                     handler.removeCallbacks(connectionTimeout);
                     // Reset retry budget after every successful reconnect, so a long live programme can recover again later.
                     if (currentIsMp3) radioReconnectAttempts = 0;
-                    notifyListener(player.isPlaying(), player.isPlaying()
-                            ? "Идёт эфир · " + currentSourceName : "Поток готов · " + currentSourceName);
+                    notifyListener(player.isPlaying(), playbackStatusMessage(player.isPlaying()));
                 } else if (state == Player.STATE_ENDED) {
                     handlePlaybackFailure("поток завершился");
                 }
@@ -199,21 +205,26 @@ public final class AudioPlaybackService extends Service {
         usingAudioOnlyHls = false;
 
         if (currentIsMp3) {
+            usingAudioOnlyHls = false;
+            audioModeStatus = "Радиопоток MP3 без видеодорожки";
             startProgressivePlayback(url, generation);
             return;
         }
 
-        notifyListener(false, "Проверяю HLS на отдельную аудиодорожку…");
+        audioModeStatus = "Проверяю структуру HLS…";
+        notifyListener(false, "Проверяю HLS: ищу отдельный аудиопоток…");
         Thread resolver = new Thread(() -> {
-            String audioOnlyUrl = resolveAudioOnlyPlaylist(url);
+            AudioPlaylistResolution resolution = resolveAudioOnlyPlaylist(url);
             handler.post(() -> {
                 if (generation != streamGeneration || player == null || !url.equals(currentUrl)) return;
-                if (audioOnlyUrl != null && !audioOnlyUrl.isEmpty()) {
+                audioModeStatus = resolution.status;
+                if (resolution.url != null && !resolution.url.isEmpty()) {
                     usingAudioOnlyHls = true;
-                    notifyListener(false, "Найдена отдельная аудиодорожка — запускаю аудио без видеосегментов…");
-                    startHlsPlayback(audioOnlyUrl, generation);
+                    notifyListener(false, resolution.status + " — запускаю аудио без видеопотока…");
+                    startHlsPlayback(resolution.url, generation);
                 } else {
-                    notifyListener(false, "Отдельная аудиодорожка не найдена — использую исходный HLS…");
+                    usingAudioOnlyHls = false;
+                    notifyListener(false, resolution.status + " — запускаю исходный HLS…");
                     startHlsPlayback(url, generation);
                 }
             });
@@ -276,7 +287,7 @@ public final class AudioPlaybackService extends Service {
      * Reads only the small HLS manifest. If it exposes a distinct AUDIO rendition
      * or an audio-only variant, return that playlist; otherwise use the original.
      */
-    private String resolveAudioOnlyPlaylist(String manifestUrl) {
+    private AudioPlaylistResolution resolveAudioOnlyPlaylist(String manifestUrl) {
         HttpURLConnection connection = null;
         try {
             URL url = new URL(manifestUrl);
@@ -293,7 +304,9 @@ public final class AudioPlaybackService extends Service {
             connection.setRequestProperty("Accept-Encoding", "identity");
 
             int responseCode = connection.getResponseCode();
-            if (responseCode < 200 || responseCode >= 300) return null;
+            if (responseCode < 200 || responseCode >= 300) {
+                return new AudioPlaylistResolution(null, "Не удалось проверить HLS: HTTP " + responseCode);
+            }
 
             ByteArrayOutputStream output = new ByteArrayOutputStream();
             try (InputStream input = connection.getInputStream()) {
@@ -302,25 +315,34 @@ public final class AudioPlaybackService extends Service {
                 int total = 0;
                 while ((read = input.read(buffer)) != -1) {
                     total += read;
-                    if (total > 512 * 1024) return null;
+                    if (total > 512 * 1024) {
+                        return new AudioPlaylistResolution(null, "HLS-манифест превышает лимит проверки 512 КБ");
+                    }
                     output.write(buffer, 0, read);
                 }
             }
             String manifest = new String(output.toByteArray(), StandardCharsets.UTF_8);
+            if (!manifest.trim().startsWith("#EXTM3U")) {
+                return new AudioPlaylistResolution(null, "Ответ сервера не является HLS-манифестом");
+            }
             return findAudioOnlyPlaylistUrl(connection.getURL().toExternalForm(), manifest);
-        } catch (Exception ignored) {
-            return null;
+        } catch (Exception error) {
+            return new AudioPlaylistResolution(null,
+                    "Не удалось проверить HLS-манифест (" + error.getClass().getSimpleName() + ")");
         } finally {
             if (connection != null) connection.disconnect();
         }
     }
 
-    private String findAudioOnlyPlaylistUrl(String baseUrl, String manifest) {
-        if (manifest == null || !manifest.contains("#EXTM3U")) return null;
-        String[] lines = manifest.replace("\r", "").split("\n");
+    private AudioPlaylistResolution findAudioOnlyPlaylistUrl(String baseUrl, String manifest) {
+        if (manifest == null || !manifest.contains("#EXTM3U")) {
+            return new AudioPlaylistResolution(null, "Некорректный HLS-манифест");
+        }
+        String[] lines = manifest.replace("\\r", "").split("\\n");
         java.util.HashSet<String> referencedAudioGroups = new java.util.HashSet<>();
 
-        for (String line : lines) {
+        for (String rawLine : lines) {
+            String line = rawLine.trim();
             if (line.startsWith("#EXT-X-STREAM-INF:")) {
                 Map<String, String> attrs = parseHlsAttributes(line);
                 String group = attrs.get("AUDIO");
@@ -330,7 +352,8 @@ public final class AudioPlaybackService extends Service {
 
         String selectedAudioUri = null;
         int selectedAudioScore = Integer.MIN_VALUE;
-        for (String line : lines) {
+        for (String rawLine : lines) {
+            String line = rawLine.trim();
             if (!line.startsWith("#EXT-X-MEDIA:")) continue;
             Map<String, String> attrs = parseHlsAttributes(line);
             if (!"AUDIO".equalsIgnoreCase(attrs.get("TYPE"))) continue;
@@ -350,7 +373,13 @@ public final class AudioPlaybackService extends Service {
                 selectedAudioUri = uri;
             }
         }
-        if (selectedAudioUri != null) return resolveSafePlaylistUri(baseUrl, selectedAudioUri);
+        if (selectedAudioUri != null) {
+            String resolved = resolveSafePlaylistUri(baseUrl, selectedAudioUri);
+            if (resolved != null) {
+                return new AudioPlaylistResolution(resolved, "Используется отдельная аудиодорожка HLS (EXT-X-MEDIA)");
+            }
+            return new AudioPlaylistResolution(null, "HLS объявляет отдельную аудиодорожку, но её URL не прошёл проверку");
+        }
 
         String bestUnderLimit = null;
         int bestUnderLimitBandwidth = -1;
@@ -370,7 +399,6 @@ public final class AudioPlaybackService extends Service {
                     int bandwidth = parseBandwidth(attrs.get("AVERAGE-BANDWIDTH"));
                     if (bandwidth <= 0) bandwidth = parseBandwidth(attrs.get("BANDWIDTH"));
                     if (bandwidth <= 0) bandwidth = 1;
-
                     if (bandwidth < lowestAudioBandwidth) {
                         lowestAudioBandwidth = bandwidth;
                         lowestAudioVariant = line;
@@ -385,7 +413,25 @@ public final class AudioPlaybackService extends Service {
         }
 
         String selectedVariant = bestUnderLimit != null ? bestUnderLimit : lowestAudioVariant;
-        return selectedVariant == null ? null : resolveSafePlaylistUri(baseUrl, selectedVariant);
+        if (selectedVariant != null) {
+            String resolved = resolveSafePlaylistUri(baseUrl, selectedVariant);
+            if (resolved != null) {
+                return new AudioPlaylistResolution(resolved, "Используется отдельный аудио-only вариант HLS (без видеокодека)");
+            }
+            return new AudioPlaylistResolution(null, "Аудио-only вариант найден, но его URL не прошёл проверку");
+        }
+
+        return new AudioPlaylistResolution(null,
+                "Отдельная аудиодорожка или аудио-only вариант не объявлены; используется исходный HLS");
+    }
+
+    private String playbackStatusMessage(boolean playing) {
+        String state = playing ? "Идёт эфир" : "Пауза";
+        if (currentIsMp3) return state + " · " + currentSourceName + " · Радиопоток MP3 без видео";
+        if (audioModeStatus == null || audioModeStatus.isEmpty()) {
+            return state + " · " + currentSourceName + " · режим аудио не определён";
+        }
+        return state + " · " + currentSourceName + " · " + audioModeStatus;
     }
 
     private String resolveSafePlaylistUri(String baseUrl, String playlistUri) {
@@ -481,6 +527,7 @@ public final class AudioPlaybackService extends Service {
         if (!currentIsMp3 && usingAudioOnlyHls && !fallbackHlsUrl.isEmpty()) {
             String fallback = fallbackHlsUrl;
             usingAudioOnlyHls = false;
+            audioModeStatus = "Отдельный аудиопоток не запустился; переключено на исходный HLS";
             streamGeneration++;
             handler.removeCallbacks(connectionTimeout);
             notifyListener(false, "Отдельная аудиодорожка недоступна. Возвращаюсь к исходному потоку…");
