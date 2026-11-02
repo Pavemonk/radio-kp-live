@@ -338,7 +338,7 @@ public final class AudioPlaybackService extends Service {
         if (manifest == null || !manifest.contains("#EXTM3U")) {
             return new AudioPlaylistResolution(null, "Некорректный HLS-манифест");
         }
-        String[] lines = manifest.replace("\\r", "").split("\\n");
+        String[] lines = manifest.replace("\r", "").split("\n");
         java.util.HashSet<String> referencedAudioGroups = new java.util.HashSet<>();
 
         for (String rawLine : lines) {
