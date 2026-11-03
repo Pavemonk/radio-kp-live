@@ -24,6 +24,7 @@ import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.hls.HlsMediaSource;
+import androidx.media3.exoplayer.dash.DashMediaSource;
 import androidx.media3.exoplayer.source.ProgressiveMediaSource;
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
 import androidx.media3.datasource.DefaultHttpDataSource;
@@ -47,6 +48,7 @@ public final class AudioPlaybackService extends Service {
     public static final String ACTION_SET_QUALITY = "ru.radiokp.voennoerevue.SET_QUALITY";
     public static final String EXTRA_URL = "stream_url";
     public static final String EXTRA_URL_CANDIDATES = "stream_url_candidates";
+    public static final String EXTRA_DASH_URL_CANDIDATES = "dash_url_candidates";
     public static final String EXTRA_REFERER = "referer";
     public static final String EXTRA_SOURCE_NAME = "source_name";
     public static final String EXTRA_MAX_AUDIO_BITRATE = "max_audio_bitrate_kbps";
@@ -71,6 +73,7 @@ public final class AudioPlaybackService extends Service {
     private DefaultTrackSelector trackSelector;
     private String currentUrl = "";
     private ArrayList<String> currentCandidateUrls = new ArrayList<>();
+    private ArrayList<String> currentDashCandidateUrls = new ArrayList<>();
     private String currentReferer = "https://vkvideo.ru/";
     private String currentSourceName = "Радио КП";
     private boolean currentIsMp3 = false;
@@ -159,12 +162,20 @@ public final class AudioPlaybackService extends Service {
             if (suppliedCandidates != null) {
                 for (String candidate : suppliedCandidates) {
                     if (currentCandidateUrls.size() >= 8) break;
-                    if (isAllowedStream(candidate, false) && !currentCandidateUrls.contains(candidate)) {
-                        currentCandidateUrls.add(candidate);
-                    }
+                    if (isAllowedHlsStream(candidate) && !currentCandidateUrls.contains(candidate)) currentCandidateUrls.add(candidate);
                 }
             }
-            if (!isMp3 && currentCandidateUrls.isEmpty() && isAllowedStream(url, false)) currentCandidateUrls.add(url);
+            ArrayList<String> suppliedDashCandidates = intent.getStringArrayListExtra(EXTRA_DASH_URL_CANDIDATES);
+            currentDashCandidateUrls = new ArrayList<>();
+            if (suppliedDashCandidates != null) {
+                for (String candidate : suppliedDashCandidates) {
+                    if (currentDashCandidateUrls.size() >= 4) break;
+                    if (isAllowedDashStream(candidate) && !currentDashCandidateUrls.contains(candidate)) currentDashCandidateUrls.add(candidate);
+                }
+            }
+            if (!isMp3 && currentCandidateUrls.isEmpty() && currentDashCandidateUrls.isEmpty() && isAllowedStream(url, false)) {
+                if (isDashManifest(url)) currentDashCandidateUrls.add(url); else currentCandidateUrls.add(url);
+            }
             if (!isAllowedStream(url, isMp3)) {
                 notifyListener(false, "SOURCE_ERROR: недопустимый адрес потока");
                 return START_NOT_STICKY;
@@ -231,26 +242,45 @@ public final class AudioPlaybackService extends Service {
             return;
         }
 
-        audioModeStatus = "Проверяю структуру HLS…";
-        notifyListener(false, "Проверяю HLS: ищу отдельный аудиопоток…");
+        audioModeStatus = "Проверяю HLS и DASH…";
+        notifyListener(false, "RuTube: проверяю DASH на отдельное аудиопредставление…");
         Thread resolver = new Thread(() -> {
-            AudioPlaylistResolution resolution = resolveAudioOnlyPlaylists(url);
+            DashAudioResolution dashResolution = resolveDashAudioCandidates();
+            AudioPlaylistResolution hlsResolution = null;
+            if (dashResolution.url == null && isHlsManifest(url)) hlsResolution = resolveAudioOnlyPlaylists(url);
+            final AudioPlaylistResolution finalHlsResolution = hlsResolution;
             handler.post(() -> {
                 if (generation != streamGeneration || player == null || !url.equals(currentUrl)) return;
-                audioModeStatus = resolution.status;
-                if (resolution.url != null && !resolution.url.isEmpty()) {
+                if (dashResolution.url != null) {
                     usingAudioOnlyHls = true;
-                    fallbackHlsUrl = resolution.fallbackUrl == null ? url : resolution.fallbackUrl;
-                    notifyListener(false, resolution.status + " — запускаю отдельный аудиопоток…");
-                    startHlsPlayback(resolution.url, generation);
+                    fallbackHlsUrl = currentCandidateUrls.isEmpty() ? "" : currentCandidateUrls.get(0);
+                    audioModeStatus = dashResolution.status;
+                    notifyListener(false, dashResolution.status + " — запускаю аудиопредставление DASH…");
+                    startDashPlayback(dashResolution.url, generation);
+                    return;
+                }
+                if (finalHlsResolution != null && finalHlsResolution.url != null && !finalHlsResolution.url.isEmpty()) {
+                    usingAudioOnlyHls = true;
+                    fallbackHlsUrl = finalHlsResolution.fallbackUrl == null ? url : finalHlsResolution.fallbackUrl;
+                    audioModeStatus = dashResolution.status + " · " + finalHlsResolution.status;
+                    notifyListener(false, audioModeStatus + " — запускаю отдельное аудио HLS…");
+                    startHlsPlayback(finalHlsResolution.url, generation);
+                } else if (isHlsManifest(url)) {
+                    usingAudioOnlyHls = false;
+                    fallbackHlsUrl = "";
+                    audioModeStatus = dashResolution.status + " · "
+                            + (finalHlsResolution == null ? "HLS не проверялся" : finalHlsResolution.status);
+                    notifyListener(false, audioModeStatus + " — запускаю исходный HLS…");
+                    startHlsPlayback(url, generation);
                 } else {
                     usingAudioOnlyHls = false;
                     fallbackHlsUrl = "";
-                    notifyListener(false, resolution.status + " — запускаю исходный HLS…");
-                    startHlsPlayback(url, generation);
+                    audioModeStatus = dashResolution.status;
+                    notifyListener(false, audioModeStatus);
+                    failCurrentSource("В ответе RuTube не найден пригодный DASH-аудиопоток или HLS-поток");
                 }
             });
-        }, "RadioKp-HlsAudioResolver");
+        }, "RadioKp-DashHlsAudioResolver");
         resolver.setDaemon(true);
         resolver.start();
     }
@@ -264,6 +294,21 @@ public final class AudioPlaybackService extends Service {
                     .setDefaultRequestProperties(createStreamHeaders());
             MediaItem item = new MediaItem.Builder().setUri(url).setMimeType(MimeTypes.AUDIO_MPEG).build();
             ProgressiveMediaSource source = new ProgressiveMediaSource.Factory(httpFactory).createMediaSource(item);
+            prepareAndPlay(source);
+        } catch (Exception e) {
+            handlePlaybackFailure(e.getClass().getSimpleName());
+        }
+    }
+
+    private void startDashPlayback(String url, int generation) {
+        try {
+            if (generation != streamGeneration || player == null) return;
+            DefaultHttpDataSource.Factory httpFactory = new DefaultHttpDataSource.Factory()
+                    .setUserAgent(USER_AGENT)
+                    .setAllowCrossProtocolRedirects(true)
+                    .setDefaultRequestProperties(createStreamHeaders());
+            MediaItem item = new MediaItem.Builder().setUri(url).setMimeType(MimeTypes.APPLICATION_MPD).build();
+            DashMediaSource source = new DashMediaSource.Factory(httpFactory).createMediaSource(item);
             prepareAndPlay(source);
         } catch (Exception e) {
             handlePlaybackFailure(e.getClass().getSimpleName());
@@ -309,6 +354,97 @@ public final class AudioPlaybackService extends Service {
      * Reads only the small HLS manifest. If it exposes a distinct AUDIO rendition
      * or an audio-only variant, return that playlist; otherwise use the original.
      */
+    private static final class DashAudioResolution {
+        final String url;
+        final String status;
+        DashAudioResolution(String url, String status) { this.url = url; this.status = status; }
+    }
+
+    private DashAudioResolution resolveDashAudioCandidates() {
+        if (currentDashCandidateUrls == null || currentDashCandidateUrls.isEmpty()) {
+            return new DashAudioResolution(null, "RuTube не объявил DASH/MPD в ответе LIVE API");
+        }
+        int checked = 0;
+        String firstReason = "отдельное аудиопредставление не найдено";
+        for (String manifestUrl : currentDashCandidateUrls) {
+            if (checked >= 4) break;
+            checked++;
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) new URL(manifestUrl).openConnection();
+                connection.setInstanceFollowRedirects(true);
+                connection.setConnectTimeout(7000);
+                connection.setReadTimeout(7000);
+                connection.setRequestProperty("User-Agent", USER_AGENT);
+                connection.setRequestProperty("Referer", currentReferer);
+                connection.setRequestProperty("Origin", "https://rutube.ru");
+                connection.setRequestProperty("Accept", "application/dash+xml,application/xml,text/xml,*/*");
+                connection.setRequestProperty("Accept-Encoding", "identity");
+                int code = connection.getResponseCode();
+                if (code < 200 || code >= 300) {
+                    firstReason = "HTTP " + code;
+                    continue;
+                }
+                ByteArrayOutputStream output = new ByteArrayOutputStream();
+                try (InputStream input = connection.getInputStream()) {
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    int total = 0;
+                    while ((read = input.read(buffer)) != -1) {
+                        total += read;
+                        if (total > 1024 * 1024) throw new IllegalStateException("MPD exceeds 1 MB");
+                        output.write(buffer, 0, read);
+                    }
+                }
+                String manifest = new String(output.toByteArray(), StandardCharsets.UTF_8);
+                if (!manifest.contains("<MPD") && !manifest.contains(":MPD")) {
+                    firstReason = "ответ не является MPD";
+                    continue;
+                }
+                if (hasSeparateDashAudio(manifest)) {
+                    return new DashAudioResolution(manifestUrl,
+                            "Найдено DASH/MPD с отдельным аудиопредставлением (" + checked + " проверено)");
+                }
+                firstReason = "MPD загружен, но отдельный AdaptationSet audio отсутствует";
+            } catch (Exception error) {
+                firstReason = error.getClass().getSimpleName();
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }
+        return new DashAudioResolution(null, "Проверено DASH/MPD: " + checked + " · " + firstReason);
+    }
+
+    private static boolean hasSeparateDashAudio(String manifest) {
+        if (manifest == null || manifest.isEmpty()) return false;
+        java.util.regex.Pattern setPattern = java.util.regex.Pattern.compile(
+                "(?is)<(?:[A-Za-z0-9_]+:)?AdaptationSet\\b([^>]*)>(.*?)</(?:[A-Za-z0-9_]+:)?AdaptationSet\\s*>");
+        java.util.regex.Matcher matcher = setPattern.matcher(manifest);
+        while (matcher.find()) {
+            String attributes = matcher.group(1) == null ? "" : matcher.group(1);
+            String inner = matcher.group(2) == null ? "" : matcher.group(2);
+            String mime = xmlAttribute(attributes, "mimeType");
+            String contentType = xmlAttribute(attributes, "contentType");
+            if ((mime != null && mime.toLowerCase(Locale.ROOT).startsWith("audio/"))
+                    || (contentType != null && contentType.equalsIgnoreCase("audio"))) return true;
+            java.util.regex.Matcher representation = java.util.regex.Pattern.compile(
+                    "(?is)<(?:[A-Za-z0-9_]+:)?Representation\\b([^>]*)>").matcher(inner);
+            while (representation.find()) {
+                String repMime = xmlAttribute(representation.group(1), "mimeType");
+                String codecs = xmlAttribute(representation.group(1), "codecs");
+                if ((repMime != null && repMime.toLowerCase(Locale.ROOT).startsWith("audio/"))
+                        || isAudioOnlyCodecList(codecs)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static String xmlAttribute(String attributes, String name) {
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile(
+                "(?i)\\b" + java.util.regex.Pattern.quote(name) + "\\s*=\\s*['\\\"]([^'\\\"]+)['\\\"]").matcher(attributes);
+        return matcher.find() ? matcher.group(1) : null;
+    }
+
     private AudioPlaylistResolution resolveAudioOnlyPlaylists(String primaryUrl) {
         LinkedHashSet<String> candidates = new LinkedHashSet<>();
         if (currentCandidateUrls != null) {
@@ -551,6 +687,22 @@ public final class AudioPlaybackService extends Service {
         }
     }
 
+    private static boolean isHlsManifest(String url) {
+        return url != null && url.toLowerCase(Locale.ROOT).contains(".m3u8");
+    }
+
+    private static boolean isDashManifest(String url) {
+        return url != null && url.toLowerCase(Locale.ROOT).contains(".mpd");
+    }
+
+    private boolean isAllowedHlsStream(String url) {
+        return isAllowedStream(url, false) && isHlsManifest(url);
+    }
+
+    private boolean isAllowedDashStream(String url) {
+        return isAllowedStream(url, false) && isDashManifest(url);
+    }
+
     private boolean isAllowedStream(String url, boolean mp3) {
         if (url == null) return false;
         try {
@@ -564,10 +716,13 @@ public final class AudioPlaybackService extends Service {
                         || host.equals("kpradio128.streamr.ru") || host.equals("kpradio.hostingradio.ru");
                 return allowedRadioHost && (scheme.equals("http") || scheme.equals("https"));
             }
-            if (!scheme.equals("https") || !url.toLowerCase(Locale.ROOT).contains(".m3u8")) return false;
-            return host.endsWith(".okcdn.ru") || host.endsWith(".vkuservideo.net") || host.endsWith(".userapi.com")
+            if (!scheme.equals("https") || (!isHlsManifest(url) && !isDashManifest(url))) return false;
+            boolean allowedHost = host.endsWith(".okcdn.ru") || host.endsWith(".vkuservideo.net") || host.endsWith(".userapi.com")
                     || host.equals("vkvideo.ru") || host.endsWith(".vkvideo.ru") || host.equals("vk.com") || host.endsWith(".vk.com")
                     || host.equals("rutube.ru") || host.endsWith(".rutube.ru")
+                    || host.equals("rtbcdn.ru") || host.endsWith(".rtbcdn.ru") || host.equals("rtbcdn.net") || host.endsWith(".rtbcdn.net");
+            if (!allowedHost) return false;
+            return !isDashManifest(url) || host.equals("rutube.ru") || host.endsWith(".rutube.ru")
                     || host.equals("rtbcdn.ru") || host.endsWith(".rtbcdn.ru") || host.equals("rtbcdn.net") || host.endsWith(".rtbcdn.net");
         } catch (Exception e) { return false; }
     }
