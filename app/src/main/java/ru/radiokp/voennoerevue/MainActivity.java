@@ -391,11 +391,16 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     private void startPlayerService(String url, ArrayList<String> urls, ArrayList<String> dashUrls, String referer, String sourceName, int qualityKbps, boolean mp3) {
+        startPlayerService(url, urls, dashUrls, new ArrayList<>(), referer, sourceName, qualityKbps, mp3);
+    }
+
+    private void startPlayerService(String url, ArrayList<String> urls, ArrayList<String> dashUrls, ArrayList<String> hdsUrls, String referer, String sourceName, int qualityKbps, boolean mp3) {
         Intent intent = new Intent(this, AudioPlaybackService.class)
                 .setAction(AudioPlaybackService.ACTION_PLAY)
                 .putExtra(AudioPlaybackService.EXTRA_URL, url)
                 .putStringArrayListExtra(AudioPlaybackService.EXTRA_URL_CANDIDATES, urls)
                 .putStringArrayListExtra(AudioPlaybackService.EXTRA_DASH_URL_CANDIDATES, dashUrls)
+                .putStringArrayListExtra(AudioPlaybackService.EXTRA_HDS_URL_CANDIDATES, hdsUrls)
                 .putExtra(AudioPlaybackService.EXTRA_REFERER, referer)
                 .putExtra(AudioPlaybackService.EXTRA_SOURCE_NAME, sourceName)
                 .putExtra(AudioPlaybackService.EXTRA_MAX_AUDIO_BITRATE, qualityKbps)
@@ -568,8 +573,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             String body = new String(bytes, StandardCharsets.UTF_8);
             ArrayList<String> resolved = source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body);
             ArrayList<String> dashResolved = source == SOURCE_RUTUBE ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
+            ArrayList<String> hdsResolved = source == SOURCE_RUTUBE ? extractRutubeLiveHdsUrls(body) : new ArrayList<>();
             if (!resolved.isEmpty() || !dashResolved.isEmpty()) {
-                handleStreamResolved(resolved, dashResolved, source);
+                handleStreamResolved(resolved, dashResolved, hdsResolved, source);
             } else if (source == SOURCE_RUTUBE && isExplicitNonLiveRutubeResponse(body)) {
                 runOnUiThread(() -> {
                     if (webView != null && webSource == SOURCE_RUTUBE && !streamStarted) {
@@ -654,12 +660,14 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             if (body == null || body.length() > 4 * 1024 * 1024 || source != currentSource || source != webSource) return;
             ArrayList<String> streams = source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body);
             ArrayList<String> dashStreams = source == SOURCE_RUTUBE ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
-            if (!streams.isEmpty() || !dashStreams.isEmpty()) handleStreamResolved(streams, dashStreams, source);
+            ArrayList<String> hdsStreams = source == SOURCE_RUTUBE ? extractRutubeLiveHdsUrls(body) : new ArrayList<>();
+            if (!streams.isEmpty() || !dashStreams.isEmpty()) handleStreamResolved(streams, dashStreams, hdsStreams, source);
         }
     }
 
     private static final int MAX_HLS_CANDIDATES = 8;
     private static final int MAX_DASH_CANDIDATES = 4;
+    private static final int MAX_HDS_CANDIDATES = 4;
 
     private static ArrayList<String> extractVkHlsUrls(String body) {
         LinkedHashSet<String> urls = new LinkedHashSet<>();
@@ -873,6 +881,70 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 || host.equals("rtbcdn.net") || host.endsWith(".rtbcdn.net"));
     }
 
+
+    /** Extract only live_streams.hds (F4M), never VOD video_balancer URLs. */
+    private static ArrayList<String> extractRutubeLiveHdsUrls(String body) {
+        LinkedHashSet<String> urls = new LinkedHashSet<>();
+        if (body == null || body.isEmpty()) return new ArrayList<>(urls);
+        Object parsed = parseJsonBody(body);
+        boolean explicitlyLive = false;
+        if (parsed != null) {
+            collectRutubeLiveHdsUrls(parsed, urls);
+            explicitlyLive = containsBooleanFlag(parsed, "is_live", true)
+                    || containsBooleanFlag(parsed, "is_livestream", true);
+            if (urls.isEmpty() && explicitlyLive) collectF4mUrls(parsed, urls);
+        } else {
+            explicitlyLive = Pattern.compile("[\\\"'](?:is_live|is_livestream)[\\\"']\\s*:\\s*(true|1)", Pattern.CASE_INSENSITIVE).matcher(body).find();
+        }
+        if (explicitlyLive || !urls.isEmpty()) {
+            Matcher matcher = Pattern.compile("https?://[^\\s\\\"'<>]+?\\.f4m(?:\\?[^\\s\\\"'<>]*)?", Pattern.CASE_INSENSITIVE).matcher(body);
+            while (matcher.find() && urls.size() < MAX_HDS_CANDIDATES) addHdsCandidate(matcher.group(), urls);
+        }
+        return new ArrayList<>(urls);
+    }
+
+    private static void collectRutubeLiveHdsUrls(Object node, LinkedHashSet<String> urls) {
+        if (node instanceof JSONObject) {
+            JSONObject object = (JSONObject) node;
+            JSONObject liveStreams = object.optJSONObject("live_streams");
+            if (liveStreams != null) collectF4mUrls(liveStreams.opt("hds"), urls);
+            JSONArray names = object.names();
+            if (names != null) for (int i = 0; i < names.length() && urls.size() < MAX_HDS_CANDIDATES; i++) {
+                collectRutubeLiveHdsUrls(object.opt(names.optString(i)), urls);
+            }
+        } else if (node instanceof JSONArray) {
+            JSONArray array = (JSONArray) node;
+            for (int i = 0; i < array.length() && urls.size() < MAX_HDS_CANDIDATES; i++) collectRutubeLiveHdsUrls(array.opt(i), urls);
+        }
+    }
+
+    private static void collectF4mUrls(Object node, LinkedHashSet<String> urls) {
+        if (node instanceof String) addHdsCandidate((String) node, urls);
+        else if (node instanceof JSONObject) {
+            JSONObject object = (JSONObject) node;
+            JSONArray names = object.names();
+            if (names != null) for (int i = 0; i < names.length() && urls.size() < MAX_HDS_CANDIDATES; i++)
+                collectF4mUrls(object.opt(names.optString(i)), urls);
+        } else if (node instanceof JSONArray) {
+            JSONArray array = (JSONArray) node;
+            for (int i = 0; i < array.length() && urls.size() < MAX_HDS_CANDIDATES; i++) collectF4mUrls(array.opt(i), urls);
+        }
+    }
+
+    private static void addHdsCandidate(String rawUrl, LinkedHashSet<String> urls) {
+        if (rawUrl == null || urls.size() >= MAX_HDS_CANDIDATES) return;
+        String candidate = cleanUrl(rawUrl.trim());
+        if (isAllowedRutubeHds(candidate)) urls.add(candidate);
+    }
+
+    private static boolean isAllowedRutubeHds(String url) {
+        if (url == null || !url.startsWith("https://") || !url.toLowerCase(Locale.ROOT).contains(".f4m")) return false;
+        String host = Uri.parse(url).getHost();
+        return host != null && (host.equals("rutube.ru") || host.endsWith(".rutube.ru")
+                || host.equals("rtbcdn.ru") || host.endsWith(".rtbcdn.ru")
+                || host.equals("rtbcdn.net") || host.endsWith(".rtbcdn.net"));
+    }
+
     private static Object parseJsonBody(String body) {
         try {
             String trimmed = body.trim();
@@ -1037,25 +1109,31 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     private void handleStreamResolved(ArrayList<String> urls, int source) {
-        handleStreamResolved(urls, new ArrayList<>(), source);
+        handleStreamResolved(urls, new ArrayList<>(), new ArrayList<>(), source);
     }
 
     private void handleStreamResolved(ArrayList<String> hlsUrls, ArrayList<String> dashUrls, int source) {
+        handleStreamResolved(hlsUrls, dashUrls, new ArrayList<>(), source);
+    }
+
+    private void handleStreamResolved(ArrayList<String> hlsUrls, ArrayList<String> dashUrls, ArrayList<String> hdsUrls, int source) {
         if (((hlsUrls == null || hlsUrls.isEmpty()) && (dashUrls == null || dashUrls.isEmpty()))
                 || source != currentSource || source != webSource || streamStarted) return;
         ArrayList<String> safeHls = hlsUrls == null ? new ArrayList<>() : hlsUrls;
         ArrayList<String> safeDash = dashUrls == null ? new ArrayList<>() : dashUrls;
+        ArrayList<String> safeHds = hdsUrls == null ? new ArrayList<>() : hdsUrls;
         String primaryUrl = !safeHls.isEmpty() ? safeHls.get(0) : safeDash.get(0);
         streamStarted = true;
         cancelSourceTimeout();
         runOnUiThread(() -> {
-            statusView.setText("Найдено HLS: " + safeHls.size() + " · DASH: " + safeDash.size() + ". Ищу отдельное аудио…");
+            statusView.setText("Найдено HLS: " + safeHls.size() + " · DASH: " + safeDash.size()
+                    + " · HDS/F4M: " + safeHds.size() + ". Проверяю отдельное аудио…");
             Runnable play = () -> {
                 if (sourcePageButton != null) sourcePageButton.setVisibility(View.GONE);
                 releaseWebView();
                 String referer = source == SOURCE_VK ? "https://vkvideo.ru/" : "https://rutube.ru/";
                 int quality = source == SOURCE_RUTUBE ? rutubeQualityKbps : vkQualityKbps;
-                startPlayerService(primaryUrl, safeHls, safeDash, referer, SOURCE_NAMES[source], quality, false);
+                startPlayerService(primaryUrl, safeHls, safeDash, safeHds, referer, SOURCE_NAMES[source], quality, false);
             };
             if (webView != null) {
                 webView.evaluateJavascript("document.querySelectorAll('video,audio').forEach(function(v){try{v.muted=true;v.pause()}catch(e){}})", value -> runOnUiThread(play));
