@@ -10,8 +10,8 @@ android {
         applicationId 'ru.radiokp.voennoerevue'
         minSdk 23
         targetSdk 35
-        versionCode 9
-        versionName '0.7.2'
+        versionCode 10
+        versionName '0.7.3'
     }
 }
 
@@ -19,4 +19,5 @@ dependencies {
     implementation 'androidx.core:core:1.15.0'
     implementation 'androidx.media3:media3-exoplayer:1.5.1'
     implementation 'androidx.media3:media3-exoplayer-hls:1.5.1'
+    implementation 'androidx.media3:media3-exoplayer-dash:1.5.1'
 }
