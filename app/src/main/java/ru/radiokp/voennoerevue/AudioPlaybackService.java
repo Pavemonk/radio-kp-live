@@ -49,7 +49,6 @@ public final class AudioPlaybackService extends Service {
     public static final String EXTRA_URL = "stream_url";
     public static final String EXTRA_URL_CANDIDATES = "stream_url_candidates";
     public static final String EXTRA_DASH_URL_CANDIDATES = "dash_url_candidates";
-    public static final String EXTRA_HDS_URL_CANDIDATES = "hds_url_candidates";
     public static final String EXTRA_REFERER = "referer";
     public static final String EXTRA_SOURCE_NAME = "source_name";
     public static final String EXTRA_MAX_AUDIO_BITRATE = "max_audio_bitrate_kbps";
@@ -75,7 +74,6 @@ public final class AudioPlaybackService extends Service {
     private String currentUrl = "";
     private ArrayList<String> currentCandidateUrls = new ArrayList<>();
     private ArrayList<String> currentDashCandidateUrls = new ArrayList<>();
-    private ArrayList<String> currentHdsCandidateUrls = new ArrayList<>();
     private String currentReferer = "https://vkvideo.ru/";
     private String currentSourceName = "Радио КП";
     private boolean currentIsMp3 = false;
@@ -175,14 +173,6 @@ public final class AudioPlaybackService extends Service {
                     if (isAllowedDashStream(candidate) && !currentDashCandidateUrls.contains(candidate)) currentDashCandidateUrls.add(candidate);
                 }
             }
-            ArrayList<String> suppliedHdsCandidates = intent.getStringArrayListExtra(EXTRA_HDS_URL_CANDIDATES);
-            currentHdsCandidateUrls = new ArrayList<>();
-            if (suppliedHdsCandidates != null) {
-                for (String candidate : suppliedHdsCandidates) {
-                    if (currentHdsCandidateUrls.size() >= 4) break;
-                    if (isAllowedHdsStream(candidate) && !currentHdsCandidateUrls.contains(candidate)) currentHdsCandidateUrls.add(candidate);
-                }
-            }
             if (!isMp3 && currentCandidateUrls.isEmpty() && currentDashCandidateUrls.isEmpty() && isAllowedStream(url, false)) {
                 if (isDashManifest(url)) currentDashCandidateUrls.add(url); else currentCandidateUrls.add(url);
             }
@@ -252,51 +242,45 @@ public final class AudioPlaybackService extends Service {
             return;
         }
 
-        final boolean isRutube = currentReferer != null && currentReferer.toLowerCase(Locale.ROOT).contains("rutube.ru");
-        audioModeStatus = isRutube ? "Проверяю HLS, DASH и HDS…" : "Проверяю HLS…";
-        notifyListener(false, isRutube ? "RuTube: проверяю альтернативные аудиопредставления…" : "Проверяю отдельную аудиодорожку HLS…");
+        audioModeStatus = "Проверяю HLS и DASH…";
+        notifyListener(false, "RuTube: проверяю DASH на отдельное аудиопредставление…");
         Thread resolver = new Thread(() -> {
-            DashAudioResolution dashResolution = isRutube
-                    ? resolveDashAudioCandidates()
-                    : new DashAudioResolution(null, "");
-            String hdsStatus = isRutube ? inspectHdsCandidates() : "";
+            DashAudioResolution dashResolution = resolveDashAudioCandidates();
             AudioPlaylistResolution hlsResolution = null;
             if (dashResolution.url == null && isHlsManifest(url)) hlsResolution = resolveAudioOnlyPlaylists(url);
             final AudioPlaylistResolution finalHlsResolution = hlsResolution;
-            final String finalHdsStatus = hdsStatus;
             handler.post(() -> {
                 if (generation != streamGeneration || player == null || !url.equals(currentUrl)) return;
                 if (dashResolution.url != null) {
                     usingAudioOnlyHls = true;
                     fallbackHlsUrl = currentCandidateUrls.isEmpty() ? "" : currentCandidateUrls.get(0);
-                    audioModeStatus = dashResolution.status + (finalHdsStatus.isEmpty() ? "" : " · " + finalHdsStatus);
-                    notifyListener(false, audioModeStatus + " — запускаю аудиопредставление DASH…");
+                    audioModeStatus = dashResolution.status;
+                    notifyListener(false, dashResolution.status + " — запускаю аудиопредставление DASH…");
                     startDashPlayback(dashResolution.url, generation);
                     return;
                 }
                 if (finalHlsResolution != null && finalHlsResolution.url != null && !finalHlsResolution.url.isEmpty()) {
                     usingAudioOnlyHls = true;
                     fallbackHlsUrl = finalHlsResolution.fallbackUrl == null ? url : finalHlsResolution.fallbackUrl;
-                    audioModeStatus = (isRutube ? dashResolution.status + " · " + finalHdsStatus + " · " : "")
-                            + finalHlsResolution.status;
+                    audioModeStatus = dashResolution.status + " · " + finalHlsResolution.status;
                     notifyListener(false, audioModeStatus + " — запускаю отдельное аудио HLS…");
                     startHlsPlayback(finalHlsResolution.url, generation);
                 } else if (isHlsManifest(url)) {
                     usingAudioOnlyHls = false;
                     fallbackHlsUrl = "";
-                    audioModeStatus = (isRutube ? dashResolution.status + " · " + finalHdsStatus + " · " : "")
+                    audioModeStatus = dashResolution.status + " · "
                             + (finalHlsResolution == null ? "HLS не проверялся" : finalHlsResolution.status);
                     notifyListener(false, audioModeStatus + " — запускаю исходный HLS…");
                     startHlsPlayback(url, generation);
                 } else {
                     usingAudioOnlyHls = false;
                     fallbackHlsUrl = "";
-                    audioModeStatus = dashResolution.status + (finalHdsStatus.isEmpty() ? "" : " · " + finalHdsStatus);
+                    audioModeStatus = dashResolution.status;
                     notifyListener(false, audioModeStatus);
-                    failCurrentSource("Не найден пригодный аудиопоток");
+                    failCurrentSource("В ответе RuTube не найден пригодный DASH-аудиопоток или HLS-поток");
                 }
             });
-        }, "RadioKp-HlsDashHdsResolver");
+        }, "RadioKp-DashHlsAudioResolver");
         resolver.setDaemon(true);
         resolver.start();
     }
@@ -370,74 +354,6 @@ public final class AudioPlaybackService extends Service {
      * Reads only the small HLS manifest. If it exposes a distinct AUDIO rendition
      * or an audio-only variant, return that playlist; otherwise use the original.
      */
-
-    /** F4M is inspected only; ExoPlayer/Media3 does not natively play HDS. */
-    private String inspectHdsCandidates() {
-        if (currentHdsCandidateUrls == null || currentHdsCandidateUrls.isEmpty()) {
-            return "RuTube не объявил HDS/F4M в live_streams";
-        }
-        int checked = 0;
-        int mediaVariants = 0;
-        boolean explicitAudioOnly = false;
-        String reason = "media-варианты не найдены";
-        for (String manifestUrl : currentHdsCandidateUrls) {
-            if (checked >= 4) break;
-            checked++;
-            HttpURLConnection connection = null;
-            try {
-                connection = (HttpURLConnection) new URL(manifestUrl).openConnection();
-                connection.setInstanceFollowRedirects(true);
-                connection.setConnectTimeout(7000);
-                connection.setReadTimeout(7000);
-                connection.setRequestProperty("User-Agent", USER_AGENT);
-                connection.setRequestProperty("Referer", currentReferer);
-                connection.setRequestProperty("Origin", "https://rutube.ru");
-                connection.setRequestProperty("Accept", "application/f4m,application/xml,text/xml,*/*");
-                connection.setRequestProperty("Accept-Encoding", "identity");
-                int code = connection.getResponseCode();
-                if (code < 200 || code >= 300) { reason = "HTTP " + code; continue; }
-                ByteArrayOutputStream output = new ByteArrayOutputStream();
-                try (InputStream input = connection.getInputStream()) {
-                    byte[] buffer = new byte[8192];
-                    int read, total = 0;
-                    while ((read = input.read(buffer)) != -1) {
-                        total += read;
-                        if (total > 512 * 1024) throw new IllegalStateException("F4M exceeds 512 KB");
-                        output.write(buffer, 0, read);
-                    }
-                }
-                String manifest = new String(output.toByteArray(), StandardCharsets.UTF_8);
-                if (!manifest.toLowerCase(Locale.ROOT).contains("<manifest")) { reason = "не F4M"; continue; }
-                java.util.regex.Matcher mediaMatcher = java.util.regex.Pattern.compile(
-                        "(?is)<(?:[A-Za-z0-9_]+:)?media\\b([^>]*)/?>").matcher(manifest);
-                while (mediaMatcher.find()) {
-                    mediaVariants++;
-                    String attrs = mediaMatcher.group(1) == null ? "" : mediaMatcher.group(1);
-                    String type = xmlAttribute(attrs, "type");
-                    String mime = xmlAttribute(attrs, "mimeType");
-                    String contentType = xmlAttribute(attrs, "contentType");
-                    String codecs = xmlAttribute(attrs, "codecs");
-                    boolean audio = (type != null && type.equalsIgnoreCase("audio"))
-                            || (contentType != null && contentType.equalsIgnoreCase("audio"))
-                            || (mime != null && mime.toLowerCase(Locale.ROOT).startsWith("audio/"));
-                    boolean video = (type != null && type.equalsIgnoreCase("video"))
-                            || (contentType != null && contentType.equalsIgnoreCase("video"))
-                            || (mime != null && mime.toLowerCase(Locale.ROOT).startsWith("video/"));
-                    if (audio && !video && isAudioOnlyCodecList(codecs)) explicitAudioOnly = true;
-                }
-                reason = "F4M прочитан";
-            } catch (Exception error) {
-                reason = error.getClass().getSimpleName();
-            } finally {
-                if (connection != null) connection.disconnect();
-            }
-        }
-        if (explicitAudioOnly) return "HDS/F4M найден: " + checked + " манифест(ов), есть audio-only метаданные; Media3 не воспроизводит HDS";
-        if (mediaVariants > 0) return "HDS/F4M найден: " + checked + " манифест(ов), media-вариантов " + mediaVariants
-                + "; отдельное аудио не подтверждено (Media3 не воспроизводит HDS)";
-        return "HDS/F4M найден: " + checked + " адрес(ов), " + reason + " (Media3 не воспроизводит HDS)";
-    }
-
     private static final class DashAudioResolution {
         final String url;
         final String status;
@@ -691,7 +607,7 @@ public final class AudioPlaybackService extends Service {
         }
 
         return new AudioPlaylistResolution(null,
-                summarizeHlsManifest(lines) + "; отдельная аудиодорожка или audio-only вариант не объявлены");
+                "Отдельная аудиодорожка или аудио-only вариант не объявлены; используется исходный HLS");
     }
 
     private String playbackStatusMessage(boolean playing) {
@@ -741,43 +657,6 @@ public final class AudioPlaybackService extends Service {
         return attrs;
     }
 
-
-    private static String summarizeHlsManifest(String[] lines) {
-        int variants = 0, audioRenditions = 0, audioUris = 0, linkedGroups = 0, segments = 0;
-        int minBandwidth = Integer.MAX_VALUE, maxBandwidth = 0;
-        java.util.HashSet<String> audioGroups = new java.util.HashSet<>();
-        java.util.HashSet<String> referencedGroups = new java.util.HashSet<>();
-        for (String rawLine : lines) {
-            String line = rawLine.trim();
-            if (line.startsWith("#EXT-X-STREAM-INF:")) {
-                variants++;
-                Map<String, String> attrs = parseHlsAttributes(line);
-                int bandwidth = parseBandwidth(attrs.get("AVERAGE-BANDWIDTH"));
-                if (bandwidth <= 0) bandwidth = parseBandwidth(attrs.get("BANDWIDTH"));
-                if (bandwidth > 0) {
-                    minBandwidth = Math.min(minBandwidth, bandwidth);
-                    maxBandwidth = Math.max(maxBandwidth, bandwidth);
-                }
-                if (attrs.get("AUDIO") != null) referencedGroups.add(attrs.get("AUDIO"));
-            } else if (line.startsWith("#EXT-X-MEDIA:")) {
-                Map<String, String> attrs = parseHlsAttributes(line);
-                if ("AUDIO".equalsIgnoreCase(attrs.get("TYPE"))) {
-                    audioRenditions++;
-                    if (attrs.containsKey("URI") && !attrs.get("URI").isEmpty()) audioUris++;
-                    if (attrs.get("GROUP-ID") != null) audioGroups.add(attrs.get("GROUP-ID"));
-                }
-            } else if (line.startsWith("#EXTINF:")) segments++;
-        }
-        for (String group : audioGroups) if (referencedGroups.contains(group)) linkedGroups++;
-        if (variants > 0) {
-            String bandwidth = minBandwidth == Integer.MAX_VALUE ? "" :
-                    ", BANDWIDTH " + (minBandwidth / 1000) + "–" + (maxBandwidth / 1000) + " кбит/с";
-            return "HLS master: вариантов " + variants + ", AUDIO rendition " + audioRenditions
-                    + ", с URI " + audioUris + ", связанных групп " + linkedGroups + bandwidth;
-        }
-        return "HLS media playlist: сегментов " + segments + ", master-вариантов нет";
-    }
-
     private static boolean isAudioOnlyCodecList(String codecs) {
         if (codecs == null || codecs.trim().isEmpty()) return false;
         boolean hasAudioCodec = false;
@@ -818,18 +697,6 @@ public final class AudioPlaybackService extends Service {
 
     private boolean isAllowedHlsStream(String url) {
         return isAllowedStream(url, false) && isHlsManifest(url);
-    }
-
-    private boolean isAllowedHdsStream(String url) {
-        if (url == null || !url.startsWith("https://") || !url.toLowerCase(Locale.ROOT).contains(".f4m")) return false;
-        try {
-            String host = android.net.Uri.parse(url).getHost();
-            if (host == null) return false;
-            host = host.toLowerCase(Locale.ROOT);
-            return host.equals("rutube.ru") || host.endsWith(".rutube.ru")
-                    || host.equals("rtbcdn.ru") || host.endsWith(".rtbcdn.ru")
-                    || host.equals("rtbcdn.net") || host.endsWith(".rtbcdn.net");
-        } catch (Exception e) { return false; }
     }
 
     private boolean isAllowedDashStream(String url) {
