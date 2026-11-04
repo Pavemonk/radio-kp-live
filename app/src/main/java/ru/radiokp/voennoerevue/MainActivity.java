@@ -1289,8 +1289,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
     private static long extractLiveStartTimeMs(String body, int source) {
         Object parsed = parseJsonBody(body);
-        if (parsed == null || !hasLiveMetadataMarker(parsed, source)) return 0L;
-
+        if (parsed == null) return 0L;
         return findLiveStartTimeInTree(parsed, source);
     }
 
@@ -1340,7 +1339,6 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         return Boolean.TRUE.equals(value) || "true".equalsIgnoreCase(String.valueOf(value))
                 || "1".equals(String.valueOf(value));
     }
-    }
 
     private static long parseTimestampMillis(Object value) {
         if (value == null || value == JSONObject.NULL) return 0L;
@@ -1359,6 +1357,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 "yyyy-MM-dd'T'HH:mm:ssXXX",
                 "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
                 "yyyy-MM-dd'T'HH:mm:ss'Z'",
+                "yyyy-MM-dd'T'HH:mm:ss.SSS",
+                "yyyy-MM-dd'T'HH:mm:ss",
                 "yyyy-MM-dd HH:mm:ss"
         };
         for (String pattern : patterns) {
