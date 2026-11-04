@@ -82,7 +82,7 @@ public final class AudioPlaybackService extends Service {
     private int radioReconnectAttempts = 0;
     private int streamGeneration = 0;
     private String fallbackHlsUrl = "";
-    private boolean usingAudioOnlyHls = false;
+    private boolean usingOptimizedHls = false;
     private String audioModeStatus = "";
     private PlaybackStateListener listener;
 
@@ -233,10 +233,10 @@ public final class AudioPlaybackService extends Service {
         handler.removeCallbacks(connectionTimeout);
         final int generation = ++streamGeneration;
         fallbackHlsUrl = currentIsMp3 ? "" : url;
-        usingAudioOnlyHls = false;
+        usingOptimizedHls = false;
 
         if (currentIsMp3) {
-            usingAudioOnlyHls = false;
+            usingOptimizedHls = false;
             audioModeStatus = "Радиопоток MP3 без видеодорожки";
             startProgressivePlayback(url, generation);
             return;
@@ -252,7 +252,7 @@ public final class AudioPlaybackService extends Service {
             handler.post(() -> {
                 if (generation != streamGeneration || player == null || !url.equals(currentUrl)) return;
                 if (dashResolution.url != null) {
-                    usingAudioOnlyHls = true;
+                    usingOptimizedHls = true;
                     fallbackHlsUrl = currentCandidateUrls.isEmpty() ? "" : currentCandidateUrls.get(0);
                     audioModeStatus = dashResolution.status;
                     notifyListener(false, dashResolution.status + " — запускаю аудиопредставление DASH…");
@@ -260,20 +260,20 @@ public final class AudioPlaybackService extends Service {
                     return;
                 }
                 if (finalHlsResolution != null && finalHlsResolution.url != null && !finalHlsResolution.url.isEmpty()) {
-                    usingAudioOnlyHls = true;
+                    usingOptimizedHls = true;
                     fallbackHlsUrl = finalHlsResolution.fallbackUrl == null ? url : finalHlsResolution.fallbackUrl;
                     audioModeStatus = dashResolution.status + " · " + finalHlsResolution.status;
-                    notifyListener(false, audioModeStatus + " — запускаю отдельное аудио HLS…");
+                    notifyListener(false, audioModeStatus + " — запускаю оптимизированный HLS…");
                     startHlsPlayback(finalHlsResolution.url, generation);
                 } else if (isHlsManifest(url)) {
-                    usingAudioOnlyHls = false;
+                    usingOptimizedHls = false;
                     fallbackHlsUrl = "";
                     audioModeStatus = dashResolution.status + " · "
                             + (finalHlsResolution == null ? "HLS не проверялся" : finalHlsResolution.status);
                     notifyListener(false, audioModeStatus + " — запускаю исходный HLS…");
                     startHlsPlayback(url, generation);
                 } else {
-                    usingAudioOnlyHls = false;
+                    usingOptimizedHls = false;
                     fallbackHlsUrl = "";
                     audioModeStatus = dashResolution.status;
                     notifyListener(false, audioModeStatus);
@@ -606,8 +606,89 @@ public final class AudioPlaybackService extends Service {
             return new AudioPlaylistResolution(null, "Аудио-only вариант найден, но его URL не прошёл проверку");
         }
 
+        // RuTube often publishes a muxed HLS master without an external
+        // AUDIO rendition. Choose the lowest-bandwidth combined A/V child
+        // playlist instead of letting ExoPlayer start at a high quality.
+        // VK keeps its existing audio-only selection logic unchanged.
+        if (isRutubeSource()) {
+            AudioPlaylistResolution lowBandwidth = findLowestBandwidthRutubeVariant(baseUrl, lines);
+            if (lowBandwidth != null && lowBandwidth.url != null) return lowBandwidth;
+        }
+
         return new AudioPlaylistResolution(null,
                 "Отдельная аудиодорожка или аудио-only вариант не объявлены; используется исходный HLS");
+    }
+
+
+    private boolean isRutubeSource() {
+        return currentReferer != null && currentReferer.toLowerCase(Locale.ROOT).contains("rutube.ru");
+    }
+
+    /**
+     * Last-resort traffic reduction for RuTube only: select the child playlist
+     * with the smallest declared average/peak bandwidth. This remains a
+     * combined audio+video stream; it is not audio-only.
+     */
+    private AudioPlaylistResolution findLowestBandwidthRutubeVariant(String baseUrl, String[] lines) {
+        String pendingVariantLine = null;
+        String lowestUri = null;
+        int lowestBandwidth = Integer.MAX_VALUE;
+        String lowestResolution = null;
+        String lowestCodecs = null;
+        int variantsSeen = 0;
+
+        for (String rawLine : lines) {
+            String line = rawLine.trim();
+            if (line.startsWith("#EXT-X-STREAM-INF:")) {
+                pendingVariantLine = line;
+                continue;
+            }
+            if (pendingVariantLine == null || line.isEmpty() || line.startsWith("#")) continue;
+
+            Map<String, String> attrs = parseHlsAttributes(pendingVariantLine);
+            int bandwidth = parseBandwidth(attrs.get("AVERAGE-BANDWIDTH"));
+            if (bandwidth <= 0) bandwidth = parseBandwidth(attrs.get("BANDWIDTH"));
+            variantsSeen++;
+
+            String codecs = attrs.get("CODECS");
+            // When CODECS is present, require an audio codec. This excludes
+            // entries that explicitly advertise only a video representation.
+            boolean hasAudio = hasAudioCodec(codecs);
+            if (codecs != null && !codecs.trim().isEmpty() && !hasAudio) {
+                pendingVariantLine = null;
+                continue;
+            }
+
+            if (bandwidth > 0 && bandwidth < lowestBandwidth) {
+                String resolved = resolveSafePlaylistUri(baseUrl, line);
+                if (resolved != null) {
+                    lowestBandwidth = bandwidth;
+                    lowestUri = resolved;
+                    lowestResolution = attrs.get("RESOLUTION");
+                    lowestCodecs = codecs;
+                }
+            }
+            pendingVariantLine = null;
+        }
+
+        if (lowestUri == null) return null;
+        StringBuilder status = new StringBuilder("Используется самый низкобитрейтный HLS-вариант RuTube");
+        status.append(" (").append(lowestBandwidth / 1000).append(" кбит/с");
+        if (lowestResolution != null && !lowestResolution.isEmpty()) status.append(", ").append(lowestResolution);
+        if (lowestCodecs != null && !lowestCodecs.isEmpty()) status.append(", ").append(lowestCodecs);
+        status.append(" из ").append(variantsSeen).append(" вариантов; видео остаётся в потоке)");
+        return new AudioPlaylistResolution(lowestUri, status.toString());
+    }
+
+    private static boolean hasAudioCodec(String codecs) {
+        if (codecs == null || codecs.trim().isEmpty()) return false;
+        for (String raw : codecs.toLowerCase(Locale.ROOT).split(",")) {
+            String codec = raw.trim();
+            if (codec.startsWith("mp4a") || codec.startsWith("ac-3") || codec.startsWith("ec-3")
+                    || codec.startsWith("opus") || codec.startsWith("ac-4") || codec.startsWith("flac")
+                    || codec.startsWith("alac")) return true;
+        }
+        return false;
     }
 
     private String playbackStatusMessage(boolean playing) {
@@ -728,13 +809,13 @@ public final class AudioPlaybackService extends Service {
     }
 
     private void handlePlaybackFailure(String reason) {
-        if (!currentIsMp3 && usingAudioOnlyHls && !fallbackHlsUrl.isEmpty()) {
+        if (!currentIsMp3 && usingOptimizedHls && !fallbackHlsUrl.isEmpty()) {
             String fallback = fallbackHlsUrl;
-            usingAudioOnlyHls = false;
-            audioModeStatus = "Отдельный аудиопоток не запустился; переключено на исходный HLS";
+            usingOptimizedHls = false;
+            audioModeStatus = "Оптимизированный HLS-вариант не запустился; возвращаюсь к исходному HLS";
             streamGeneration++;
             handler.removeCallbacks(connectionTimeout);
-            notifyListener(false, "Отдельная аудиодорожка недоступна. Возвращаюсь к исходному потоку…");
+            notifyListener(false, "Оптимизированный вариант недоступен. Возвращаюсь к исходному потоку…");
             if (player != null) {
                 try { player.stop(); } catch (Exception ignored) { }
                 try { player.clearMediaItems(); } catch (Exception ignored) { }
