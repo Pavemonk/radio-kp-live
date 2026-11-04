@@ -133,6 +133,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         vkQualityKbps = preferences.getInt("vk_quality_kbps", 64);
         rutubeQualityKbps = preferences.getInt("rutube_quality_kbps", 64);
         radioQualityKbps = preferences.getInt("radio_quality_kbps", 64);
+        liveStartEpochMs = preferences.getLong("live_start_epoch_ms", 0L);
         buildUi();
         requestNotificationPermissionIfNeeded();
         if (autoStart) {
@@ -1262,12 +1263,14 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         // Keep the first trustworthy start timestamp for this broadcast session across source changes.
         if (liveStartEpochMs == 0L) {
             liveStartEpochMs = timestampMs;
+            if (preferences != null) preferences.edit().putLong("live_start_epoch_ms", liveStartEpochMs).apply();
         }
         if (liveSessionActive) startElapsedTicker();
     }
 
     private void clearLiveStartTime() {
         liveStartEpochMs = 0L;
+        if (preferences != null) preferences.edit().remove("live_start_epoch_ms").apply();
     }
 
     private void startElapsedTicker() {
