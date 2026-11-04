@@ -1331,7 +1331,6 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         if ("live".equalsIgnoreCase(object.optString("type", ""))
                 || "live".equalsIgnoreCase(object.optString("live_status", ""))
                 || "started".equalsIgnoreCase(object.optString("live_status", ""))) return true;
-        if (object.has("live_id")) return true;
         return source == SOURCE_RUTUBE && object.has("live_streams");
     }
 
@@ -1356,10 +1355,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
                 "yyyy-MM-dd'T'HH:mm:ssXXX",
                 "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
-                "yyyy-MM-dd'T'HH:mm:ss'Z'",
-                "yyyy-MM-dd'T'HH:mm:ss.SSS",
-                "yyyy-MM-dd'T'HH:mm:ss",
-                "yyyy-MM-dd HH:mm:ss"
+                "yyyy-MM-dd'T'HH:mm:ss'Z'"
         };
         for (String pattern : patterns) {
             try {
