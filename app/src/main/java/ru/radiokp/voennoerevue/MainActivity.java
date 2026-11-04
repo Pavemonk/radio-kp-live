@@ -20,7 +20,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
-import android.os.SystemClock;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -91,15 +90,15 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private int radioQualityKbps = 64;
     private int attemptedSourcesMask = 0;
     private int attemptId = 0;
-    private long listeningStartedAt = 0L;
+    private long liveStartEpochMs = 0L;
+    private boolean liveSessionActive = false;
     private boolean isPlaying = false;
     private Runnable sourceTimeout;
 
     private final Runnable elapsedTicker = new Runnable() {
         @Override public void run() {
-            if (isPlaying && listeningStartedAt > 0 && elapsedView != null) {
-                long seconds = Math.max(0, (SystemClock.elapsedRealtime() - listeningStartedAt) / 1000L);
-                elapsedView.setText("LIVE  ·  " + formatTime(seconds));
+            if (liveSessionActive && liveStartEpochMs > 0L && elapsedView != null) {
+                updateElapsedView();
                 handler.postDelayed(this, 1000L);
             }
         }
@@ -111,6 +110,13 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             playbackService.setPlaybackStateListener(MainActivity.this);
             playbackService.setMaxAudioBitrate(currentSource == SOURCE_RUTUBE ? rutubeQualityKbps :
                     (currentSource == SOURCE_RADIO ? radioQualityKbps : vkQualityKbps));
+            if (playbackService.hasStream()) {
+                liveSessionActive = true;
+                isPlaying = playbackService.isPlaying();
+                startElapsedTicker();
+            } else if (!streamStarted) {
+                clearLiveStartTime();
+            }
             updateControls();
         }
         @Override public void onServiceDisconnected(ComponentName name) {
@@ -127,6 +133,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         vkQualityKbps = preferences.getInt("vk_quality_kbps", 64);
         rutubeQualityKbps = preferences.getInt("rutube_quality_kbps", 64);
         radioQualityKbps = preferences.getInt("radio_quality_kbps", 64);
+        liveStartEpochMs = preferences.getLong("live_start_epoch_ms", 0L);
         buildUi();
         requestNotificationPermissionIfNeeded();
         if (autoStart) {
@@ -329,9 +336,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         attemptedSourcesMask |= bit;
         currentSource = source;
         streamStarted = false;
-        listeningStartedAt = 0L;
+        liveSessionActive = liveStartEpochMs > 0L;
         isPlaying = false;
-        handler.removeCallbacks(elapsedTicker);
+        if (liveSessionActive) startElapsedTicker();
+        else handler.removeCallbacks(elapsedTicker);
         if (playbackService != null && playbackService.hasStream()) playbackService.stopPlayback();
         releaseWebView();
         updateControls();
@@ -371,6 +379,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
     private void startRadioStream() {
         streamStarted = true;
+        liveSessionActive = true;
+        updateElapsedView();
         statusView.setText("Подключаю резервный радиопоток · " + radioQualityKbps + " кбит/с…");
         liveProgress.setIndeterminate(true);
         String url;
@@ -420,6 +430,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             }
         }
         isPlaying = false;
+        liveSessionActive = false;
+        clearLiveStartTime();
         if (sourcePageButton != null) sourcePageButton.setVisibility(View.GONE);
         liveProgress.setIndeterminate(false);
         liveProgress.setProgress(0);
@@ -447,7 +459,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         attemptId++;
         streamStarted = false;
         isPlaying = false;
-        listeningStartedAt = 0L;
+        liveSessionActive = false;
+        clearLiveStartTime();
         handler.removeCallbacks(elapsedTicker);
         if (playbackService != null) playbackService.stopPlayback();
         releaseWebView();
@@ -539,7 +552,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 if (source == SOURCE_VK && url.contains("video.getVideoDiscover") && isVkHost(host)) {
                     return fetchAndInspect(url, request.getRequestHeaders(), source);
                 }
-                if (source == SOURCE_RUTUBE && url.contains("/api/play/options/") && isRutubeHost(host)) {
+                if (source == SOURCE_RUTUBE && (url.contains("/api/play/options/") || url.contains("/api/video/")) && isRutubeHost(host)) {
                     return fetchAndInspect(url, request.getRequestHeaders(), source);
                 }
                 return super.shouldInterceptRequest(view, request);
@@ -566,11 +579,18 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             InputStream input = code >= 400 ? connection.getErrorStream() : connection.getInputStream();
             byte[] bytes = input == null ? new byte[0] : readAll(input, 4 * 1024 * 1024);
             String body = new String(bytes, StandardCharsets.UTF_8);
+            boolean selectedRutubeMetadata = source != SOURCE_RUTUBE
+                    || !url.contains("/api/video/")
+                    || isSelectedRutubeVideoMetadataUrl(url);
+            long liveStartMs = selectedRutubeMetadata ? extractLiveStartTimeMs(body, source) : 0L;
             ArrayList<String> resolved = source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body);
             ArrayList<String> dashResolved = source == SOURCE_RUTUBE ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
             if (!resolved.isEmpty() || !dashResolved.isEmpty()) {
-                handleStreamResolved(resolved, dashResolved, source);
-            } else if (source == SOURCE_RUTUBE && isExplicitNonLiveRutubeResponse(body)) {
+                handleStreamResolved(resolved, dashResolved, source, liveStartMs);
+            } else if (liveStartMs > 0L) {
+                runOnUiThread(() -> acceptLiveStartTime(liveStartMs, source));
+            }
+            if (resolved.isEmpty() && dashResolved.isEmpty() && source == SOURCE_RUTUBE && isExplicitNonLiveRutubeResponse(body)) {
                 runOnUiThread(() -> {
                     if (webView != null && webSource == SOURCE_RUTUBE && !streamStarted) {
                         webView.evaluateJavascript("document.querySelectorAll('video').forEach(function(v){try{v.muted=true;v.pause()}catch(e){}})", null);
@@ -654,7 +674,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             if (body == null || body.length() > 4 * 1024 * 1024 || source != currentSource || source != webSource) return;
             ArrayList<String> streams = source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body);
             ArrayList<String> dashStreams = source == SOURCE_RUTUBE ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
-            if (!streams.isEmpty() || !dashStreams.isEmpty()) handleStreamResolved(streams, dashStreams, source);
+            long liveStartMs = (!streams.isEmpty() || !dashStreams.isEmpty())
+                    ? extractLiveStartTimeMs(body, source) : 0L;
+            if (!streams.isEmpty() || !dashStreams.isEmpty()) handleStreamResolved(streams, dashStreams, source, liveStartMs);
         }
     }
 
@@ -765,6 +787,13 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             if (isAllowedVkHls(value)) return value;
         }
         return null;
+    }
+
+    private boolean isSelectedRutubeVideoMetadataUrl(String apiUrl) {
+        if (apiUrl == null || currentPageUrl == null) return false;
+        Matcher api = Pattern.compile("/api/video/([a-f0-9]+)/", Pattern.CASE_INSENSITIVE).matcher(apiUrl);
+        Matcher page = Pattern.compile("/video/([a-f0-9]+)/?", Pattern.CASE_INSENSITIVE).matcher(currentPageUrl);
+        return api.find() && page.find() && api.group(1).equalsIgnoreCase(page.group(1));
     }
 
     private static boolean isExplicitNonLiveRutubeResponse(String body) {
@@ -1041,6 +1070,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     private void handleStreamResolved(ArrayList<String> hlsUrls, ArrayList<String> dashUrls, int source) {
+        handleStreamResolved(hlsUrls, dashUrls, source, 0L);
+    }
+
+    private void handleStreamResolved(ArrayList<String> hlsUrls, ArrayList<String> dashUrls, int source, long discoveredStartTimeMs) {
         if (((hlsUrls == null || hlsUrls.isEmpty()) && (dashUrls == null || dashUrls.isEmpty()))
                 || source != currentSource || source != webSource || streamStarted) return;
         ArrayList<String> safeHls = hlsUrls == null ? new ArrayList<>() : hlsUrls;
@@ -1049,6 +1082,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         streamStarted = true;
         cancelSourceTimeout();
         runOnUiThread(() -> {
+            if (discoveredStartTimeMs > 0L) acceptLiveStartTime(discoveredStartTimeMs, source);
+            liveSessionActive = true;
+            startElapsedTicker();
             statusView.setText("Найдено HLS: " + safeHls.size() + " · DASH: " + safeDash.size() + ". Ищу отдельное аудио…");
             Runnable play = () -> {
                 if (sourcePageButton != null) sourcePageButton.setVisibility(View.GONE);
@@ -1183,6 +1219,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 isPlaying = false;
                 liveProgress.setIndeterminate(false);
                 liveProgress.setProgress(0);
+                if (liveStartEpochMs > 0L && liveSessionActive) updateElapsedView();
                 if (autoFailover) {
                     statusView.setText("Поток " + SOURCE_NAMES[currentSource] + " прервался. Ищу резервный источник…");
                     handler.postDelayed(() -> tryNextSource("Ошибка воспроизведения"), 450L);
@@ -1198,19 +1235,148 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             if (message != null && (message.contains("Подключ") || message.contains("буфер"))) {
                 liveProgress.setIndeterminate(true);
             } else if (playing) {
+                liveSessionActive = true;
                 liveProgress.setIndeterminate(false);
                 liveProgress.setProgress(100);
-                if (listeningStartedAt == 0L) listeningStartedAt = SystemClock.elapsedRealtime();
-                handler.removeCallbacks(elapsedTicker);
-                handler.post(elapsedTicker);
+                updateElapsedView();
+                startElapsedTicker();
             } else if (!playing) {
                 liveProgress.setIndeterminate(false);
                 liveProgress.setProgress(0);
-                elapsedView.setText(message != null && message.toLowerCase(Locale.ROOT).contains("пауза") ? "ПАУЗА" : "ОЖИДАНИЕ ЭФИРА");
-                handler.removeCallbacks(elapsedTicker);
+                if (liveStartEpochMs > 0L && liveSessionActive) {
+                    updateElapsedView();
+                    startElapsedTicker();
+                } else if (liveSessionActive) {
+                    elapsedView.setText(message != null && message.toLowerCase(Locale.ROOT).contains("пауза")
+                            ? "ПАУЗА" : "LIVE");
+                } else {
+                    elapsedView.setText(message != null && message.toLowerCase(Locale.ROOT).contains("пауза")
+                            ? "ПАУЗА" : "ОЖИДАНИЕ ЭФИРА");
+                }
             }
             updateControls();
         });
+    }
+
+    private void acceptLiveStartTime(long timestampMs, int source) {
+        if (timestampMs <= 0L || source != currentSource || (source != SOURCE_RADIO && source != webSource)) return;
+        // Keep the first trustworthy start timestamp for this broadcast session across source changes.
+        if (liveStartEpochMs == 0L) {
+            liveStartEpochMs = timestampMs;
+            if (preferences != null) preferences.edit().putLong("live_start_epoch_ms", liveStartEpochMs).apply();
+        }
+        if (liveSessionActive) startElapsedTicker();
+    }
+
+    private void clearLiveStartTime() {
+        liveStartEpochMs = 0L;
+        if (preferences != null) preferences.edit().remove("live_start_epoch_ms").apply();
+    }
+
+    private void startElapsedTicker() {
+        handler.removeCallbacks(elapsedTicker);
+        updateElapsedView();
+        if (liveSessionActive && liveStartEpochMs > 0L) handler.postDelayed(elapsedTicker, 1000L);
+    }
+
+    private void updateElapsedView() {
+        if (!liveSessionActive || elapsedView == null) return;
+        if (liveStartEpochMs > 0L) {
+            long seconds = Math.max(0L, (System.currentTimeMillis() - liveStartEpochMs) / 1000L);
+            elapsedView.setText("LIVE  ·  " + formatTime(seconds));
+        } else {
+            // The source is live, but no authoritative start time was supplied by its metadata.
+            elapsedView.setText("LIVE");
+        }
+    }
+
+    private static long extractLiveStartTimeMs(String body, int source) {
+        Object parsed = parseJsonBody(body);
+        if (parsed == null) return 0L;
+        return findLiveStartTimeInTree(parsed, source);
+    }
+
+    private static long findLiveStartTimeInTree(Object node, int source) {
+        if (node instanceof JSONObject) {
+            JSONObject object = (JSONObject) node;
+            if (hasLocalLiveMetadataMarker(object, source)) {
+                String[] keys = {
+                        "live_started_at", "live_started_ts",
+                        "stream_started_at", "stream_started_ts",
+                        "broadcast_started_at", "broadcast_started_ts",
+                        "actual_start_time", "actual_started_at", "started_at"
+                };
+                for (String key : keys) {
+                    long candidate = parseTimestampMillis(object.opt(key));
+                    if (isPlausibleLiveStart(candidate)) return candidate;
+                }
+            }
+            JSONArray names = object.names();
+            if (names != null) {
+                for (int i = 0; i < names.length(); i++) {
+                    long candidate = findLiveStartTimeInTree(object.opt(names.optString(i)), source);
+                    if (candidate > 0L) return candidate;
+                }
+            }
+        } else if (node instanceof JSONArray) {
+            JSONArray array = (JSONArray) node;
+            for (int i = 0; i < array.length(); i++) {
+                long candidate = findLiveStartTimeInTree(array.opt(i), source);
+                if (candidate > 0L) return candidate;
+            }
+        }
+        return 0L;
+    }
+
+    private static boolean hasLocalLiveMetadataMarker(JSONObject object, int source) {
+        if (isTruthy(object.opt("is_live")) || isTruthy(object.opt("is_livestream"))
+                || isTruthy(object.opt("live"))) return true;
+        if ("live".equalsIgnoreCase(object.optString("type", ""))
+                || "live".equalsIgnoreCase(object.optString("live_status", ""))
+                || "started".equalsIgnoreCase(object.optString("live_status", ""))) return true;
+        return source == SOURCE_RUTUBE && object.has("live_streams");
+    }
+
+    private static boolean isTruthy(Object value) {
+        return Boolean.TRUE.equals(value) || "true".equalsIgnoreCase(String.valueOf(value))
+                || "1".equals(String.valueOf(value));
+    }
+
+    private static long parseTimestampMillis(Object value) {
+        if (value == null || value == JSONObject.NULL) return 0L;
+        if (value instanceof Number) {
+            double raw = ((Number) value).doubleValue();
+            return raw > 1000000000000d ? (long) raw : (long) (raw * 1000d);
+        }
+        String text = String.valueOf(value).trim();
+        if (text.isEmpty()) return 0L;
+        try {
+            double raw = Double.parseDouble(text);
+            return raw > 1000000000000d ? (long) raw : (long) (raw * 1000d);
+        } catch (NumberFormatException ignored) { }
+        String[] patterns = {
+                "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+                "yyyy-MM-dd'T'HH:mm:ssXXX",
+                "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+                "yyyy-MM-dd'T'HH:mm:ss'Z'"
+        };
+        for (String pattern : patterns) {
+            try {
+                java.text.SimpleDateFormat parser = new java.text.SimpleDateFormat(pattern, Locale.US);
+                parser.setLenient(false);
+                if (pattern.endsWith("'Z'")) parser.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+                java.util.Date parsed = parser.parse(text);
+                if (parsed != null) return parsed.getTime();
+            } catch (Exception ignored) { }
+        }
+        return 0L;
+    }
+
+    private static boolean isPlausibleLiveStart(long timestampMs) {
+        if (timestampMs < 946684800000L) return false; // Before 2000-01-01 is not a valid stream start.
+        long now = System.currentTimeMillis();
+        return timestampMs <= now + 2L * 60L * 1000L
+                && timestampMs >= now - 14L * 24L * 60L * 60L * 1000L;
     }
 
     private static String formatTime(long seconds) {
