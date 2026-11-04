@@ -133,7 +133,6 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         vkQualityKbps = preferences.getInt("vk_quality_kbps", 64);
         rutubeQualityKbps = preferences.getInt("rutube_quality_kbps", 64);
         radioQualityKbps = preferences.getInt("radio_quality_kbps", 64);
-        liveStartEpochMs = preferences.getLong("live_start_epoch_ms", 0L);
         buildUi();
         requestNotificationPermissionIfNeeded();
         if (autoStart) {
@@ -579,7 +578,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             InputStream input = code >= 400 ? connection.getErrorStream() : connection.getInputStream();
             byte[] bytes = input == null ? new byte[0] : readAll(input, 4 * 1024 * 1024);
             String body = new String(bytes, StandardCharsets.UTF_8);
-            long liveStartMs = extractLiveStartTimeMs(body, source);
+            boolean selectedRutubeMetadata = source != SOURCE_RUTUBE
+                    || !url.contains("/api/video/")
+                    || isSelectedRutubeVideoMetadataUrl(url);
+            long liveStartMs = selectedRutubeMetadata ? extractLiveStartTimeMs(body, source) : 0L;
             ArrayList<String> resolved = source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body);
             ArrayList<String> dashResolved = source == SOURCE_RUTUBE ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
             if (!resolved.isEmpty() || !dashResolved.isEmpty()) {
@@ -669,11 +671,11 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         StreamBridge(int source) { this.source = source; }
         @JavascriptInterface public void onPossibleStreamText(String body) {
             if (body == null || body.length() > 4 * 1024 * 1024 || source != currentSource || source != webSource) return;
-            long liveStartMs = extractLiveStartTimeMs(body, source);
             ArrayList<String> streams = source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body);
             ArrayList<String> dashStreams = source == SOURCE_RUTUBE ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
+            long liveStartMs = (!streams.isEmpty() || !dashStreams.isEmpty())
+                    ? extractLiveStartTimeMs(body, source) : 0L;
             if (!streams.isEmpty() || !dashStreams.isEmpty()) handleStreamResolved(streams, dashStreams, source, liveStartMs);
-            else if (liveStartMs > 0L) runOnUiThread(() -> acceptLiveStartTime(liveStartMs, source));
         }
     }
 
@@ -784,6 +786,13 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             if (isAllowedVkHls(value)) return value;
         }
         return null;
+    }
+
+    private boolean isSelectedRutubeVideoMetadataUrl(String apiUrl) {
+        if (apiUrl == null || currentPageUrl == null) return false;
+        Matcher api = Pattern.compile("/api/video/([a-f0-9]+)/", Pattern.CASE_INSENSITIVE).matcher(apiUrl);
+        Matcher page = Pattern.compile("/video/([a-f0-9]+)/?", Pattern.CASE_INSENSITIVE).matcher(currentPageUrl);
+        return api.find() && page.find() && api.group(1).equalsIgnoreCase(page.group(1));
     }
 
     private static boolean isExplicitNonLiveRutubeResponse(String body) {
@@ -1236,6 +1245,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 if (liveStartEpochMs > 0L && liveSessionActive) {
                     updateElapsedView();
                     startElapsedTicker();
+                } else if (liveSessionActive) {
+                    elapsedView.setText(message != null && message.toLowerCase(Locale.ROOT).contains("пауза")
+                            ? "ПАУЗА" : "LIVE");
                 } else {
                     elapsedView.setText(message != null && message.toLowerCase(Locale.ROOT).contains("пауза")
                             ? "ПАУЗА" : "ОЖИДАНИЕ ЭФИРА");
@@ -1250,14 +1262,12 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         // Keep the first trustworthy start timestamp for this broadcast session across source changes.
         if (liveStartEpochMs == 0L) {
             liveStartEpochMs = timestampMs;
-            if (preferences != null) preferences.edit().putLong("live_start_epoch_ms", liveStartEpochMs).apply();
         }
         if (liveSessionActive) startElapsedTicker();
     }
 
     private void clearLiveStartTime() {
         liveStartEpochMs = 0L;
-        if (preferences != null) preferences.edit().remove("live_start_epoch_ms").apply();
     }
 
     private void startElapsedTicker() {
@@ -1271,7 +1281,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         if (liveStartEpochMs > 0L) {
             long seconds = Math.max(0L, (System.currentTimeMillis() - liveStartEpochMs) / 1000L);
             elapsedView.setText("LIVE  ·  " + formatTime(seconds));
-        } else if (isPlaying) {
+        } else {
             // The source is live, but no authoritative start time was supplied by its metadata.
             elapsedView.setText("LIVE");
         }
@@ -1281,81 +1291,55 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         Object parsed = parseJsonBody(body);
         if (parsed == null || !hasLiveMetadataMarker(parsed, source)) return 0L;
 
-        String[] keys = source == SOURCE_RUTUBE
-                ? new String[]{"started_at", "started_ts", "live_started_at", "live_started_ts",
-                    "stream_started_at", "stream_started_ts", "broadcast_started_at",
-                    "actual_start_time", "actual_started_at", "created_ts"}
-                : new String[]{"started_at", "started_ts", "live_started_at", "live_started_ts",
-                    "stream_started_at", "stream_started_ts", "broadcast_started_at",
-                    "actual_start_time", "actual_started_at"};
+        return findLiveStartTimeInTree(parsed, source);
+    }
 
-        for (String key : keys) {
-            Object value = findJsonValue(parsed, key);
-            long candidate = parseTimestampMillis(value);
-            if (isPlausibleLiveStart(candidate)) return candidate;
+    private static long findLiveStartTimeInTree(Object node, int source) {
+        if (node instanceof JSONObject) {
+            JSONObject object = (JSONObject) node;
+            if (hasLocalLiveMetadataMarker(object, source)) {
+                String[] keys = {
+                        "live_started_at", "live_started_ts",
+                        "stream_started_at", "stream_started_ts",
+                        "broadcast_started_at", "broadcast_started_ts",
+                        "actual_start_time", "actual_started_at", "started_at"
+                };
+                for (String key : keys) {
+                    long candidate = parseTimestampMillis(object.opt(key));
+                    if (isPlausibleLiveStart(candidate)) return candidate;
+                }
+            }
+            JSONArray names = object.names();
+            if (names != null) {
+                for (int i = 0; i < names.length(); i++) {
+                    long candidate = findLiveStartTimeInTree(object.opt(names.optString(i)), source);
+                    if (candidate > 0L) return candidate;
+                }
+            }
+        } else if (node instanceof JSONArray) {
+            JSONArray array = (JSONArray) node;
+            for (int i = 0; i < array.length(); i++) {
+                long candidate = findLiveStartTimeInTree(array.opt(i), source);
+                if (candidate > 0L) return candidate;
+            }
         }
-        // VK's live_start_time is deliberately excluded: VK documents it as a scheduled start,
-        // not proof of when the broadcaster actually went live.
         return 0L;
     }
 
-    private static boolean hasLiveMetadataMarker(Object node, int source) {
-        if (containsBooleanFlag(node, "is_live", true) || containsBooleanFlag(node, "is_livestream", true)) return true;
-        if (containsStringValue(node, "type", "live")
-                || containsStringValue(node, "live_status", "live")
-                || containsStringValue(node, "live_status", "started")) return true;
-        return source == SOURCE_RUTUBE && containsJsonKey(node, "live_streams");
+    private static boolean hasLocalLiveMetadataMarker(JSONObject object, int source) {
+        if (isTruthy(object.opt("is_live")) || isTruthy(object.opt("is_livestream"))
+                || isTruthy(object.opt("live"))) return true;
+        if ("live".equalsIgnoreCase(object.optString("type", ""))
+                || "live".equalsIgnoreCase(object.optString("live_status", ""))
+                || "started".equalsIgnoreCase(object.optString("live_status", ""))) return true;
+        if (object.has("live_id")) return true;
+        return source == SOURCE_RUTUBE && object.has("live_streams");
     }
 
-    private static boolean containsStringValue(Object node, String key, String expected) {
-        if (node instanceof JSONObject) {
-            JSONObject object = (JSONObject) node;
-            if (object.has(key) && expected.equalsIgnoreCase(object.optString(key, ""))) return true;
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length(); i++) {
-                if (containsStringValue(object.opt(names.optString(i)), key, expected)) return true;
-            }
-        } else if (node instanceof JSONArray) {
-            JSONArray array = (JSONArray) node;
-            for (int i = 0; i < array.length(); i++) {
-                if (containsStringValue(array.opt(i), key, expected)) return true;
-            }
-        }
-        return false;
+    private static boolean isTruthy(Object value) {
+        return Boolean.TRUE.equals(value) || "true".equalsIgnoreCase(String.valueOf(value))
+                || "1".equals(String.valueOf(value));
     }
-
-    private static boolean containsJsonKey(Object node, String key) {
-        if (node instanceof JSONObject) {
-            JSONObject object = (JSONObject) node;
-            if (object.has(key)) return true;
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length(); i++) {
-                if (containsJsonKey(object.opt(names.optString(i)), key)) return true;
-            }
-        } else if (node instanceof JSONArray) {
-            JSONArray array = (JSONArray) node;
-            for (int i = 0; i < array.length(); i++) if (containsJsonKey(array.opt(i), key)) return true;
-        }
-        return false;
-    }
-
-    private static Object findJsonValue(Object node, String soughtKey) {
-        if (node instanceof JSONObject) {
-            JSONObject object = (JSONObject) node;
-            if (object.has(soughtKey)) return object.opt(soughtKey);
-            JSONArray names = object.names();
-            if (names != null) for (int i = 0; i < names.length(); i++) {
-                Object found = findJsonValue(object.opt(names.optString(i)), soughtKey);
-                if (found != null) return found;
-            }
-        } else if (node instanceof JSONArray) {
-            JSONArray array = (JSONArray) node;
-            for (int i = 0; i < array.length(); i++) {
-                Object found = findJsonValue(array.opt(i), soughtKey);
-                if (found != null) return found;
-            }
-        }
-        return null;
     }
 
     private static long parseTimestampMillis(Object value) {
