@@ -1283,7 +1283,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         if (diagnosticView == null || currentSource != SOURCE_RUTUBE) return;
         diagnosticView.setVisibility(View.VISIBLE);
         diagnosticView.setText("ДИАГНОСТИКА · " + rutubeApiDiagnostic
-                + "\\n" + rutubeHlsDiagnostic);
+                + "\n" + rutubeHlsDiagnostic);
     }
 
     private static String formatDateTime(long timestampMs) {
