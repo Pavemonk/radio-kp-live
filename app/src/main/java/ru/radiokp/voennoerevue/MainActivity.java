@@ -74,6 +74,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private TextView sourceView;
     private TextView elapsedView;
     private TextView diagnosticView;
+    private String rutubeApiDiagnostic = "Ожидание ответа LIVE API…";
+    private String rutubeHlsDiagnostic = "Ожидание проверки HLS-плейлиста…";
     private Button playPauseButton;
     private Button sourcePageButton;
     private Button[] sourceButtons = new Button[3];
@@ -621,7 +623,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             long liveDurationMs = selectedRutubeMetadata ? extractLiveDurationMs(body, source) : 0L;
             if (source == SOURCE_RUTUBE && selectedRutubeMetadata) {
                 String diagnostic = buildRutubeApiDiagnostic(url, code, body, liveStartMs, liveDurationMs);
-                runOnUiThread(() -> setDiagnostic(diagnostic));
+                runOnUiThread(() -> {
+                    rutubeApiDiagnostic = diagnostic;
+                    renderRutubeDiagnostics();
+                });
             }
             if (liveDurationMs > 0L) runOnUiThread(() -> acceptLiveDuration(liveDurationMs, source));
             ArrayList<String> resolved = source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body);
@@ -1261,19 +1266,24 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         int source = webSource;
         runOnUiThread(() -> {
             acceptLiveStartTime(timestampMs, source);
-            setDiagnostic("HLS: найдено время сегмента " + formatDateTime(timestampMs)
-                    + " · источник: EXT-X-PROGRAM-DATE-TIME");
+            rutubeHlsDiagnostic = "HLS: найдено время сегмента " + formatDateTime(timestampMs)
+                    + " · EXT-X-PROGRAM-DATE-TIME";
+            renderRutubeDiagnostics();
         });
     }
 
     @Override public void onHlsDiagnostics(String diagnostic) {
-        runOnUiThread(() -> setDiagnostic(diagnostic));
+        runOnUiThread(() -> {
+            rutubeHlsDiagnostic = diagnostic;
+            renderRutubeDiagnostics();
+        });
     }
 
-    private void setDiagnostic(String value) {
-        if (diagnosticView == null || currentSource != SOURCE_RUTUBE || value == null) return;
+    private void renderRutubeDiagnostics() {
+        if (diagnosticView == null || currentSource != SOURCE_RUTUBE) return;
         diagnosticView.setVisibility(View.VISIBLE);
-        diagnosticView.setText("ДИАГНОСТИКА · " + value);
+        diagnosticView.setText("ДИАГНОСТИКА · " + rutubeApiDiagnostic
+                + "\\n" + rutubeHlsDiagnostic);
     }
 
     private static String formatDateTime(long timestampMs) {
