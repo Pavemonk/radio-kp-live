@@ -73,6 +73,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private TextView statusView;
     private TextView sourceView;
     private TextView elapsedView;
+    private TextView diagnosticView;
     private Button playPauseButton;
     private Button sourcePageButton;
     private Button[] sourceButtons = new Button[3];
@@ -232,6 +233,12 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         elapsedLp.topMargin = dp(8);
         elapsedLp.bottomMargin = dp(18);
         root.addView(elapsedView, elapsedLp);
+
+        diagnosticView = text("Диагностика эфира: ожидаю данные…", 10, Color.rgb(112, 122, 137), false);
+        diagnosticView.setVisibility(View.GONE);
+        LinearLayout.LayoutParams diagnosticLp = new LinearLayout.LayoutParams(-1, -2);
+        diagnosticLp.bottomMargin = dp(10);
+        root.addView(diagnosticView, diagnosticLp);
 
         LinearLayout transport = new LinearLayout(this);
         transport.setGravity(Gravity.CENTER_VERTICAL);
@@ -612,6 +619,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                     || isSelectedRutubeVideoMetadataUrl(url);
             long liveStartMs = selectedRutubeMetadata ? extractLiveStartTimeMs(body, source) : 0L;
             long liveDurationMs = selectedRutubeMetadata ? extractLiveDurationMs(body, source) : 0L;
+            if (source == SOURCE_RUTUBE && selectedRutubeMetadata) {
+                String diagnostic = buildRutubeApiDiagnostic(url, code, body, liveStartMs, liveDurationMs);
+                runOnUiThread(() -> setDiagnostic(diagnostic));
+            }
             if (liveDurationMs > 0L) runOnUiThread(() -> acceptLiveDuration(liveDurationMs, source));
             ArrayList<String> resolved = source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body);
             ArrayList<String> dashResolved = source == SOURCE_RUTUBE ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
@@ -1248,7 +1259,37 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
     @Override public void onLiveProgramDateTime(long timestampMs) {
         int source = webSource;
-        runOnUiThread(() -> acceptLiveStartTime(timestampMs, source));
+        runOnUiThread(() -> {
+            acceptLiveStartTime(timestampMs, source);
+            setDiagnostic("HLS: найдено время сегмента " + formatDateTime(timestampMs)
+                    + " · источник: EXT-X-PROGRAM-DATE-TIME");
+        });
+    }
+
+    @Override public void onHlsDiagnostics(String diagnostic) {
+        runOnUiThread(() -> setDiagnostic(diagnostic));
+    }
+
+    private void setDiagnostic(String value) {
+        if (diagnosticView == null || currentSource != SOURCE_RUTUBE || value == null) return;
+        diagnosticView.setVisibility(View.VISIBLE);
+        diagnosticView.setText("ДИАГНОСТИКА · " + value);
+    }
+
+    private static String formatDateTime(long timestampMs) {
+        return new java.text.SimpleDateFormat("dd.MM HH:mm:ss", Locale.ROOT)
+                .format(new java.util.Date(timestampMs));
+    }
+
+    private static String buildRutubeApiDiagnostic(String url, int httpCode, String body,
+                                                    long startMs, long durationMs) {
+        String endpoint = url.contains("/api/video/") ? "video API" : "LIVE API/лента";
+        String liveMarker = body != null && (body.contains("\\"is_live\\"") ||
+                body.contains("\\"is_livestream\\"") || body.contains("\\"live_streams\\""))
+                ? "LIVE-маркеры есть" : "LIVE-маркеры не обнаружены";
+        return endpoint + " HTTP " + httpCode + " · " + liveMarker
+                + " · start=" + (startMs > 0L ? formatDateTime(startMs) : "нет")
+                + " · duration=" + (durationMs > 0L ? (durationMs / 60000L) + " мин" : "нет");
     }
 
     @Override public void onPlaybackStateChanged(boolean playing, String message) {
