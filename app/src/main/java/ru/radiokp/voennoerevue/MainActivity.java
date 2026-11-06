@@ -1372,8 +1372,17 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         }
         long elapsed = Math.max(0L, System.currentTimeMillis() - anchor);
         long scale = Math.max(1L, liveScaleDurationMs);
+        // Never let a long-running broadcast pin the bar at 100%: grow the scale
+        // in whole broadcast-duration steps (or whole hours for the fallback).
+        if (elapsed >= scale) {
+            long steps = (elapsed / scale) + 1L;
+            if (steps > Long.MAX_VALUE / scale) steps = Long.MAX_VALUE / scale;
+            scale = Math.max(scale, steps * scale);
+            liveScaleDurationMs = scale;
+            if (preferences != null) preferences.edit().putLong("live_scale_duration_ms", scale).apply();
+        }
         long scaledProgress = (elapsed * 1000L) / scale;
-        int progress = elapsed > 0L ? (int) Math.max(1L, Math.min(1000L, scaledProgress)) : 0;
+        int progress = elapsed > 0L ? (int) Math.max(1L, Math.min(999L, scaledProgress)) : 0;
         liveProgress.setIndeterminate(false);
         liveProgress.setProgress(progress);
     }
