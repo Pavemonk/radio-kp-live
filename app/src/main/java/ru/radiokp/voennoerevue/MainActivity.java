@@ -14,6 +14,8 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.ClipDrawable;
+import android.graphics.drawable.LayerDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -204,12 +206,24 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         root.addView(statusCard);
 
         liveProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        liveProgress.setMax(100);
+        liveProgress.setMax(1000);
         liveProgress.setProgress(0);
+        // Keep a clearly visible track even when the elapsed portion is only a few seconds.
+        GradientDrawable progressTrack = new GradientDrawable();
+        progressTrack.setColor(Color.rgb(48, 54, 64));
+        progressTrack.setCornerRadius(dp(4));
+        GradientDrawable progressFill = new GradientDrawable();
+        progressFill.setColor(Color.rgb(255, 107, 53));
+        progressFill.setCornerRadius(dp(4));
+        ClipDrawable clippedProgress = new ClipDrawable(progressFill, Gravity.START, ClipDrawable.HORIZONTAL);
+        LayerDrawable progressLayers = new LayerDrawable(new android.graphics.drawable.Drawable[]{progressTrack, clippedProgress});
+        progressLayers.setId(0, android.R.id.background);
+        progressLayers.setId(1, android.R.id.progress);
+        liveProgress.setProgressDrawable(progressLayers);
+        liveProgress.setMinimumHeight(dp(7));
         liveProgress.setIndeterminate(true);
         liveProgress.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(Color.rgb(255, 107, 53)));
-        liveProgress.setProgressTintList(android.content.res.ColorStateList.valueOf(Color.rgb(255, 107, 53)));
-        LinearLayout.LayoutParams progressLp = new LinearLayout.LayoutParams(-1, dp(5));
+        LinearLayout.LayoutParams progressLp = new LinearLayout.LayoutParams(-1, dp(7));
         progressLp.topMargin = dp(19);
         root.addView(liveProgress, progressLp);
 
@@ -1358,7 +1372,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         }
         long elapsed = Math.max(0L, System.currentTimeMillis() - anchor);
         long scale = Math.max(1L, liveScaleDurationMs);
-        int progress = (int) Math.min(100L, (elapsed * 100L) / scale);
+        long scaledProgress = (elapsed * 1000L) / scale;
+        int progress = elapsed > 0L ? (int) Math.max(1L, Math.min(1000L, scaledProgress)) : 0;
         liveProgress.setIndeterminate(false);
         liveProgress.setProgress(progress);
     }
@@ -1376,9 +1391,14 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     private static long findLiveDurationInTree(Object node, int source) {
+        return findLiveDurationInTree(node, source, false);
+    }
+
+    private static long findLiveDurationInTree(Object node, int source, boolean inheritedLiveContext) {
         if (node instanceof JSONObject) {
             JSONObject object = (JSONObject) node;
-            if (hasLocalLiveMetadataMarker(object, source)) {
+            boolean liveContext = inheritedLiveContext || hasLocalLiveMetadataMarker(object, source);
+            if (liveContext) {
                 String[] durationKeys = {
                         "broadcast_duration_ms", "stream_duration_ms", "live_duration_ms",
                         "total_duration_ms", "expected_duration_ms", "planned_duration_ms",
@@ -1409,14 +1429,14 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             JSONArray names = object.names();
             if (names != null) {
                 for (int i = 0; i < names.length(); i++) {
-                    long candidate = findLiveDurationInTree(object.opt(names.optString(i)), source);
+                    long candidate = findLiveDurationInTree(object.opt(names.optString(i)), source, liveContext);
                     if (candidate > 0L) return candidate;
                 }
             }
         } else if (node instanceof JSONArray) {
             JSONArray array = (JSONArray) node;
             for (int i = 0; i < array.length(); i++) {
-                long candidate = findLiveDurationInTree(array.opt(i), source);
+                long candidate = findLiveDurationInTree(array.opt(i), source, inheritedLiveContext);
                 if (candidate > 0L) return candidate;
             }
         }
@@ -1424,15 +1444,21 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     private static boolean hasLiveStartField(JSONObject object) {
-        String[] keys = {"live_started_at", "live_started_ts", "stream_started_at", "stream_started_ts",
-                "broadcast_started_at", "broadcast_started_ts", "actual_start_time", "actual_started_at", "started_at"};
+        String[] keys = {"live_started_at", "live_started_ts", "live_start_at", "live_start_time", "live_start_ts",
+                "stream_started_at", "stream_started_ts", "stream_start_at", "stream_start_time", "stream_start_ts",
+                "broadcast_started_at", "broadcast_started_ts", "broadcast_start_at", "broadcast_start_time", "broadcast_start_ts",
+                "actual_start_time", "actual_start_ts", "actual_started_at", "actual_started_ts",
+                "started_at", "started_ts", "start_time", "start_ts"};
         for (String key : keys) if (object.has(key) && parseTimestampMillis(object.opt(key)) > 0L) return true;
         return false;
     }
 
     private static long findStartOnObject(JSONObject object) {
-        String[] keys = {"live_started_at", "live_started_ts", "stream_started_at", "stream_started_ts",
-                "broadcast_started_at", "broadcast_started_ts", "actual_start_time", "actual_started_at", "started_at"};
+        String[] keys = {"live_started_at", "live_started_ts", "live_start_at", "live_start_time", "live_start_ts",
+                "stream_started_at", "stream_started_ts", "stream_start_at", "stream_start_time", "stream_start_ts",
+                "broadcast_started_at", "broadcast_started_ts", "broadcast_start_at", "broadcast_start_time", "broadcast_start_ts",
+                "actual_start_time", "actual_start_ts", "actual_started_at", "actual_started_ts",
+                "started_at", "started_ts", "start_time", "start_ts"};
         for (String key : keys) {
             long value = parseTimestampMillis(object.opt(key));
             if (isPlausibleLiveStart(value)) return value;
@@ -1479,14 +1505,20 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     private static long findLiveStartTimeInTree(Object node, int source) {
+        return findLiveStartTimeInTree(node, source, false);
+    }
+
+    private static long findLiveStartTimeInTree(Object node, int source, boolean inheritedLiveContext) {
         if (node instanceof JSONObject) {
             JSONObject object = (JSONObject) node;
-            if (hasLocalLiveMetadataMarker(object, source)) {
+            boolean liveContext = inheritedLiveContext || hasLocalLiveMetadataMarker(object, source);
+            if (liveContext) {
                 String[] keys = {
-                        "live_started_at", "live_started_ts",
-                        "stream_started_at", "stream_started_ts",
-                        "broadcast_started_at", "broadcast_started_ts",
-                        "actual_start_time", "actual_started_at", "started_at"
+                        "live_started_at", "live_started_ts", "live_start_at", "live_start_time", "live_start_ts",
+                        "stream_started_at", "stream_started_ts", "stream_start_at", "stream_start_time", "stream_start_ts",
+                        "broadcast_started_at", "broadcast_started_ts", "broadcast_start_at", "broadcast_start_time", "broadcast_start_ts",
+                        "actual_start_time", "actual_start_ts", "actual_started_at", "actual_started_ts",
+                        "started_at", "started_ts", "start_time", "start_ts"
                 };
                 for (String key : keys) {
                     long candidate = parseTimestampMillis(object.opt(key));
@@ -1496,14 +1528,14 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             JSONArray names = object.names();
             if (names != null) {
                 for (int i = 0; i < names.length(); i++) {
-                    long candidate = findLiveStartTimeInTree(object.opt(names.optString(i)), source);
+                    long candidate = findLiveStartTimeInTree(object.opt(names.optString(i)), source, liveContext);
                     if (candidate > 0L) return candidate;
                 }
             }
         } else if (node instanceof JSONArray) {
             JSONArray array = (JSONArray) node;
             for (int i = 0; i < array.length(); i++) {
-                long candidate = findLiveStartTimeInTree(array.opt(i), source);
+                long candidate = findLiveStartTimeInTree(array.opt(i), source, inheritedLiveContext);
                 if (candidate > 0L) return candidate;
             }
         }
