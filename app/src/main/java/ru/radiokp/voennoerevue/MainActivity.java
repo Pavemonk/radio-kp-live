@@ -91,13 +91,15 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private int attemptedSourcesMask = 0;
     private int attemptId = 0;
     private long liveStartEpochMs = 0L;
+    // Fallback clock: when the platform does not expose the real broadcast start.
+    private long sessionStartEpochMs = 0L;
     private boolean liveSessionActive = false;
     private boolean isPlaying = false;
     private Runnable sourceTimeout;
 
     private final Runnable elapsedTicker = new Runnable() {
         @Override public void run() {
-            if (liveSessionActive && liveStartEpochMs > 0L && elapsedView != null) {
+            if (liveSessionActive && (liveStartEpochMs > 0L || sessionStartEpochMs > 0L) && elapsedView != null) {
                 updateElapsedView();
                 handler.postDelayed(this, 1000L);
             }
@@ -113,6 +115,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             if (playbackService.hasStream()) {
                 liveSessionActive = true;
                 isPlaying = playbackService.isPlaying();
+                ensureSessionStartTime();
                 startElapsedTicker();
             } else if (!streamStarted) {
                 clearLiveStartTime();
@@ -134,6 +137,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         rutubeQualityKbps = preferences.getInt("rutube_quality_kbps", 64);
         radioQualityKbps = preferences.getInt("radio_quality_kbps", 64);
         liveStartEpochMs = preferences.getLong("live_start_epoch_ms", 0L);
+        sessionStartEpochMs = preferences.getLong("session_start_epoch_ms", 0L);
         buildUi();
         requestNotificationPermissionIfNeeded();
         if (autoStart) {
@@ -336,7 +340,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         attemptedSourcesMask |= bit;
         currentSource = source;
         streamStarted = false;
-        liveSessionActive = liveStartEpochMs > 0L;
+        liveSessionActive = liveStartEpochMs > 0L || sessionStartEpochMs > 0L;
         isPlaying = false;
         if (liveSessionActive) startElapsedTicker();
         else handler.removeCallbacks(elapsedTicker);
@@ -1219,7 +1223,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 isPlaying = false;
                 liveProgress.setIndeterminate(false);
                 liveProgress.setProgress(0);
-                if (liveStartEpochMs > 0L && liveSessionActive) updateElapsedView();
+                if (liveSessionActive) updateElapsedView();
                 if (autoFailover) {
                     statusView.setText("Поток " + SOURCE_NAMES[currentSource] + " прервался. Ищу резервный источник…");
                     handler.postDelayed(() -> tryNextSource("Ошибка воспроизведения"), 450L);
@@ -1236,8 +1240,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 liveProgress.setIndeterminate(true);
             } else if (playing) {
                 liveSessionActive = true;
-                liveProgress.setIndeterminate(false);
-                liveProgress.setProgress(100);
+                ensureSessionStartTime();
+                // Animated activity indicator, not a fake 100% completion bar.
+                liveProgress.setProgress(0);
+                liveProgress.setIndeterminate(true);
                 updateElapsedView();
                 startElapsedTicker();
             } else if (!playing) {
@@ -1270,13 +1276,27 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
     private void clearLiveStartTime() {
         liveStartEpochMs = 0L;
-        if (preferences != null) preferences.edit().remove("live_start_epoch_ms").apply();
+        sessionStartEpochMs = 0L;
+        if (preferences != null) preferences.edit()
+                .remove("live_start_epoch_ms")
+                .remove("session_start_epoch_ms")
+                .apply();
+    }
+
+    private void ensureSessionStartTime() {
+        if (sessionStartEpochMs > 0L) return;
+        sessionStartEpochMs = System.currentTimeMillis();
+        if (preferences != null) preferences.edit()
+                .putLong("session_start_epoch_ms", sessionStartEpochMs)
+                .apply();
     }
 
     private void startElapsedTicker() {
         handler.removeCallbacks(elapsedTicker);
         updateElapsedView();
-        if (liveSessionActive && liveStartEpochMs > 0L) handler.postDelayed(elapsedTicker, 1000L);
+        if (liveSessionActive && (liveStartEpochMs > 0L || sessionStartEpochMs > 0L)) {
+            handler.postDelayed(elapsedTicker, 1000L);
+        }
     }
 
     private void updateElapsedView() {
@@ -1284,8 +1304,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         if (liveStartEpochMs > 0L) {
             long seconds = Math.max(0L, (System.currentTimeMillis() - liveStartEpochMs) / 1000L);
             elapsedView.setText("LIVE  ·  " + formatTime(seconds));
+        } else if (sessionStartEpochMs > 0L) {
+            long seconds = Math.max(0L, (System.currentTimeMillis() - sessionStartEpochMs) / 1000L);
+            elapsedView.setText("LIVE  ·  с подключения " + formatTime(seconds));
         } else {
-            // The source is live, but no authoritative start time was supplied by its metadata.
             elapsedView.setText("LIVE");
         }
     }
