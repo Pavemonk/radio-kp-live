@@ -64,6 +64,7 @@ public final class AudioPlaybackService extends Service {
     public interface PlaybackStateListener {
         void onPlaybackStateChanged(boolean playing, String message);
         void onLiveProgramDateTime(long timestampMs);
+        void onHlsDiagnostics(String diagnostic);
     }
 
     public final class LocalBinder extends Binder {
@@ -356,7 +357,10 @@ public final class AudioPlaybackService extends Service {
                 connection.setRequestProperty("User-Agent", USER_AGENT);
                 connection.setRequestProperty("Range", "bytes=0-262143");
                 int code = connection.getResponseCode();
-                if (code < 200 || code >= 300) return;
+                if (code < 200 || code >= 300) {
+                    postHlsDiagnostic(generation, playlistUrl, "HLS HTTP " + code);
+                    return;
+                }
                 InputStream input = connection.getInputStream();
                 ByteArrayOutputStream output = new ByteArrayOutputStream();
                 byte[] buffer = new byte[4096];
@@ -369,13 +373,25 @@ public final class AudioPlaybackService extends Service {
                 }
                 input.close();
                 String manifest = output.toString(StandardCharsets.UTF_8.name());
-                if (!manifest.startsWith("#EXTM3U")) return;
+                if (!manifest.startsWith("#EXTM3U")) {
+                    postHlsDiagnostic(generation, playlistUrl, "ответ не является HLS-плейлистом");
+                    return;
+                }
                 java.util.regex.Matcher sequence = java.util.regex.Pattern
                         .compile("(?m)^#EXT-X-MEDIA-SEQUENCE:(\\d+)\\s*$").matcher(manifest);
-                if (sequence.find() && !"0".equals(sequence.group(1))) return;
+                String sequenceValue = sequence.find() ? sequence.group(1) : "не указан";
+                if (!"0".equals(sequenceValue) && !"не указан".equals(sequenceValue)) {
+                    postHlsDiagnostic(generation, playlistUrl, "HLS media-sequence=" + sequenceValue
+                            + " · плейлист уже начался не с первого сегмента");
+                    return;
+                }
                 java.util.regex.Matcher pdt = java.util.regex.Pattern
                         .compile("(?m)^#EXT-X-PROGRAM-DATE-TIME:(.+?)\\s*$").matcher(manifest);
-                if (!pdt.find()) return;
+                if (!pdt.find()) {
+                    postHlsDiagnostic(generation, playlistUrl, "HLS media-sequence=" + sequenceValue
+                            + " · EXT-X-PROGRAM-DATE-TIME отсутствует");
+                    return;
+                }
                 String dateText = pdt.group(1).trim();
                 // Android 6 compatibility: parse the common UTC form without java.time APIs.
                 if (!dateText.endsWith("Z")) return;
@@ -383,23 +399,38 @@ public final class AudioPlaybackService extends Service {
                 SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US);
                 dateFormat.setTimeZone(TimeZone.getTimeZone("UTC"));
                 Date parsedDate = dateFormat.parse(normalizedDate);
-                if (parsedDate == null) return;
+                if (parsedDate == null) {
+                    postHlsDiagnostic(generation, playlistUrl, "PDT найден, но формат даты не распознан: " + dateText);
+                    return;
+                }
                 long timestamp = parsedDate.getTime();
                 long now = System.currentTimeMillis();
-                if (timestamp <= 0L || timestamp > now + 60000L || now - timestamp > 24L * 60L * 60L * 1000L) return;
+                if (timestamp <= 0L || timestamp > now + 60000L || now - timestamp > 24L * 60L * 60L * 1000L) {
+                    postHlsDiagnostic(generation, playlistUrl, "PDT найден, но время вне допустимого диапазона: " + dateText);
+                    return;
+                }
+                postHlsDiagnostic(generation, playlistUrl, "PDT найден: " + dateText + " · sequence=" + sequenceValue);
                 handler.post(() -> {
                     if (generation != streamGeneration || !currentUrl.equals(playlistUrl)) return;
                     PlaybackStateListener target = listener;
                     if (target != null) target.onLiveProgramDateTime(timestamp);
                 });
-            } catch (Exception ignored) {
-                // HLS playlists often omit programme timestamps; keep connection-time fallback.
+            } catch (Exception error) {
+                postHlsDiagnostic(generation, playlistUrl, "ошибка чтения HLS: " + error.getClass().getSimpleName());
             } finally {
                 if (connection != null) connection.disconnect();
             }
         }, "RadioKp-HlsPdtProbe");
         probe.setDaemon(true);
         probe.start();
+    }
+
+    private void postHlsDiagnostic(int generation, String playlistUrl, String diagnostic) {
+        handler.post(() -> {
+            if (generation != streamGeneration || !currentUrl.equals(playlistUrl)) return;
+            PlaybackStateListener target = listener;
+            if (target != null) target.onHlsDiagnostics(diagnostic);
+        });
     }
 
     private Map<String, String> createStreamHeaders() {
