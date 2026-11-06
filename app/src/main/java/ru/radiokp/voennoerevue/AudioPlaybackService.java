@@ -394,7 +394,10 @@ public final class AudioPlaybackService extends Service {
                 }
                 String dateText = pdt.group(1).trim();
                 // Android 6 compatibility: parse the common UTC form without java.time APIs.
-                if (!dateText.endsWith("Z")) return;
+                if (!dateText.endsWith("Z")) {
+                    postHlsDiagnostic(generation, playlistUrl, "PDT найден, но часовой пояс не UTC Z: " + dateText);
+                    return;
+                }
                 String normalizedDate = dateText.replaceFirst("\\.\\d+(?=Z$)", "");
                 SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US);
                 dateFormat.setTimeZone(TimeZone.getTimeZone("UTC"));
