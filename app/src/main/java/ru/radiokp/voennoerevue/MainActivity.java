@@ -1246,6 +1246,11 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         }
     }
 
+    @Override public void onLiveProgramDateTime(long timestampMs) {
+        int source = webSource;
+        runOnUiThread(() -> acceptLiveStartTime(timestampMs, source));
+    }
+
     @Override public void onPlaybackStateChanged(boolean playing, String message) {
         runOnUiThread(() -> {
             if (message != null && message.startsWith("SOURCE_ERROR:")) {
