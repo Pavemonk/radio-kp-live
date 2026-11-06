@@ -39,6 +39,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.Locale;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.Map;
 
 public final class AudioPlaybackService extends Service {
@@ -60,6 +62,7 @@ public final class AudioPlaybackService extends Service {
 
     public interface PlaybackStateListener {
         void onPlaybackStateChanged(boolean playing, String message);
+        void onLiveProgramDateTime(long timestampMs);
     }
 
     public final class LocalBinder extends Binder {
@@ -324,10 +327,70 @@ public final class AudioPlaybackService extends Service {
                     .setDefaultRequestProperties(createStreamHeaders());
             MediaItem item = new MediaItem.Builder().setUri(url).build();
             HlsMediaSource source = new HlsMediaSource.Factory(httpFactory).createMediaSource(item);
+            inspectHlsProgramDateTime(url, generation);
             prepareAndPlay(source);
         } catch (Exception e) {
             handlePlaybackFailure(e.getClass().getSimpleName());
         }
+    }
+
+    /**
+     * Reads the selected media playlist separately from ExoPlayer. A PDT tag on a
+     * sliding live window is NOT the programme start, so accept it only when the
+     * playlist begins at media sequence zero (or omits the sequence tag).
+     * This is metadata-only and never changes the URL, quality, or player source.
+     */
+    private void inspectHlsProgramDateTime(String playlistUrl, int generation) {
+        Thread probe = new Thread(() -> {
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) new URL(playlistUrl).openConnection();
+                connection.setConnectTimeout(4000);
+                connection.setReadTimeout(4000);
+                connection.setInstanceFollowRedirects(true);
+                connection.setRequestMethod("GET");
+                for (Map.Entry<String, String> header : createStreamHeaders().entrySet()) {
+                    connection.setRequestProperty(header.getKey(), header.getValue());
+                }
+                connection.setRequestProperty("User-Agent", USER_AGENT);
+                connection.setRequestProperty("Range", "bytes=0-262143");
+                int code = connection.getResponseCode();
+                if (code < 200 || code >= 300) return;
+                InputStream input = connection.getInputStream();
+                ByteArrayOutputStream output = new ByteArrayOutputStream();
+                byte[] buffer = new byte[4096];
+                int total = 0, count;
+                while ((count = input.read(buffer)) != -1 && total < 262144) {
+                    int accepted = Math.min(count, 262144 - total);
+                    output.write(buffer, 0, accepted);
+                    total += accepted;
+                    if (accepted < count) break;
+                }
+                input.close();
+                String manifest = output.toString(StandardCharsets.UTF_8.name());
+                if (!manifest.startsWith("#EXTM3U")) return;
+                java.util.regex.Matcher sequence = java.util.regex.Pattern
+                        .compile("(?m)^#EXT-X-MEDIA-SEQUENCE:(\\d+)\\s*$").matcher(manifest);
+                if (sequence.find() && !"0".equals(sequence.group(1))) return;
+                java.util.regex.Matcher pdt = java.util.regex.Pattern
+                        .compile("(?m)^#EXT-X-PROGRAM-DATE-TIME:(.+?)\\s*$").matcher(manifest);
+                if (!pdt.find()) return;
+                long timestamp = Instant.parse(pdt.group(1).trim()).toEpochMilli();
+                long now = System.currentTimeMillis();
+                if (timestamp <= 0L || timestamp > now + 60000L || now - timestamp > 24L * 60L * 60L * 1000L) return;
+                handler.post(() -> {
+                    if (generation != streamGeneration || !currentUrl.equals(playlistUrl)) return;
+                    PlaybackStateListener target = listener;
+                    if (target != null) target.onLiveProgramDateTime(timestamp);
+                });
+            } catch (Exception ignored) {
+                // HLS playlists often omit programme timestamps; keep connection-time fallback.
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }, "RadioKp-HlsPdtProbe");
+        probe.setDaemon(true);
+        probe.start();
     }
 
     private Map<String, String> createStreamHeaders() {
