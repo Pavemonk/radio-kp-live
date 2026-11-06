@@ -1284,8 +1284,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private static String buildRutubeApiDiagnostic(String url, int httpCode, String body,
                                                     long startMs, long durationMs) {
         String endpoint = url.contains("/api/video/") ? "video API" : "LIVE API/лента";
-        String liveMarker = body != null && (body.contains("\\"is_live\\"") ||
-                body.contains("\\"is_livestream\\"") || body.contains("\\"live_streams\\""))
+        String liveMarker = body != null && (body.contains("\"is_live\"") ||
+                body.contains("\"is_livestream\"") || body.contains("\"live_streams\""))
                 ? "LIVE-маркеры есть" : "LIVE-маркеры не обнаружены";
         return endpoint + " HTTP " + httpCode + " · " + liveMarker
                 + " · start=" + (startMs > 0L ? formatDateTime(startMs) : "нет")
