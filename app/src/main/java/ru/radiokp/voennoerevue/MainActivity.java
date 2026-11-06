@@ -1249,7 +1249,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             } else if (!playing) {
                 liveProgress.setIndeterminate(false);
                 liveProgress.setProgress(0);
-                if (liveStartEpochMs > 0L && liveSessionActive) {
+                if (liveSessionActive && (liveStartEpochMs > 0L || sessionStartEpochMs > 0L)) {
                     updateElapsedView();
                     startElapsedTicker();
                 } else if (liveSessionActive) {
