@@ -93,6 +93,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private long liveStartEpochMs = 0L;
     // Fallback clock: when the platform does not expose the real broadcast start.
     private long sessionStartEpochMs = 0L;
+    // Display scale for the elapsed-time bar. One hour is the fallback when metadata has no total duration.
+    private static final long DEFAULT_LIVE_SCALE_MS = 60L * 60L * 1000L;
+    private long liveScaleDurationMs = DEFAULT_LIVE_SCALE_MS;
+    private boolean liveScaleFromMetadata = false;
     private boolean liveSessionActive = false;
     private boolean isPlaying = false;
     private Runnable sourceTimeout;
@@ -138,6 +142,12 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         radioQualityKbps = preferences.getInt("radio_quality_kbps", 64);
         liveStartEpochMs = preferences.getLong("live_start_epoch_ms", 0L);
         sessionStartEpochMs = preferences.getLong("session_start_epoch_ms", 0L);
+        liveScaleDurationMs = preferences.getLong("live_scale_duration_ms", DEFAULT_LIVE_SCALE_MS);
+        liveScaleFromMetadata = preferences.getBoolean("live_scale_from_metadata", false);
+        if (liveScaleDurationMs < 5L * 60L * 1000L || liveScaleDurationMs > 24L * 60L * 60L * 1000L) {
+            liveScaleDurationMs = DEFAULT_LIVE_SCALE_MS;
+            liveScaleFromMetadata = false;
+        }
         buildUi();
         requestNotificationPermissionIfNeeded();
         if (autoStart) {
@@ -587,6 +597,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                     || !url.contains("/api/video/")
                     || isSelectedRutubeVideoMetadataUrl(url);
             long liveStartMs = selectedRutubeMetadata ? extractLiveStartTimeMs(body, source) : 0L;
+            long liveDurationMs = selectedRutubeMetadata ? extractLiveDurationMs(body, source) : 0L;
+            if (liveDurationMs > 0L) runOnUiThread(() -> acceptLiveDuration(liveDurationMs, source));
             ArrayList<String> resolved = source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body);
             ArrayList<String> dashResolved = source == SOURCE_RUTUBE ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
             if (!resolved.isEmpty() || !dashResolved.isEmpty()) {
@@ -680,7 +692,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             ArrayList<String> dashStreams = source == SOURCE_RUTUBE ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
             long liveStartMs = (!streams.isEmpty() || !dashStreams.isEmpty())
                     ? extractLiveStartTimeMs(body, source) : 0L;
+            long liveDurationMs = (!streams.isEmpty() || !dashStreams.isEmpty())
+                    ? extractLiveDurationMs(body, source) : 0L;
             if (!streams.isEmpty() || !dashStreams.isEmpty()) handleStreamResolved(streams, dashStreams, source, liveStartMs);
+            if (liveDurationMs > 0L) runOnUiThread(() -> acceptLiveDuration(liveDurationMs, source));
         }
     }
 
@@ -1222,8 +1237,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             if (message != null && message.startsWith("SOURCE_ERROR:")) {
                 isPlaying = false;
                 liveProgress.setIndeterminate(false);
-                liveProgress.setProgress(0);
                 if (liveSessionActive) updateElapsedView();
+                else liveProgress.setProgress(0);
                 if (autoFailover) {
                     statusView.setText("Поток " + SOURCE_NAMES[currentSource] + " прервался. Ищу резервный источник…");
                     handler.postDelayed(() -> tryNextSource("Ошибка воспроизведения"), 450L);
@@ -1237,18 +1252,20 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             isPlaying = playing;
             statusView.setText(message);
             if (message != null && (message.contains("Подключ") || message.contains("буфер"))) {
-                liveProgress.setIndeterminate(true);
+                if (liveSessionActive && (liveStartEpochMs > 0L || sessionStartEpochMs > 0L)) {
+                    liveProgress.setIndeterminate(false);
+                    updateElapsedView();
+                } else {
+                    liveProgress.setIndeterminate(true);
+                }
             } else if (playing) {
                 liveSessionActive = true;
                 ensureSessionStartTime();
-                // Animated activity indicator, not a fake 100% completion bar.
-                liveProgress.setProgress(0);
-                liveProgress.setIndeterminate(true);
+                liveProgress.setIndeterminate(false);
                 updateElapsedView();
                 startElapsedTicker();
             } else if (!playing) {
                 liveProgress.setIndeterminate(false);
-                liveProgress.setProgress(0);
                 if (liveSessionActive && (liveStartEpochMs > 0L || sessionStartEpochMs > 0L)) {
                     updateElapsedView();
                     startElapsedTicker();
@@ -1277,10 +1294,27 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private void clearLiveStartTime() {
         liveStartEpochMs = 0L;
         sessionStartEpochMs = 0L;
+        liveScaleDurationMs = DEFAULT_LIVE_SCALE_MS;
+        liveScaleFromMetadata = false;
         if (preferences != null) preferences.edit()
                 .remove("live_start_epoch_ms")
                 .remove("session_start_epoch_ms")
+                .remove("live_scale_duration_ms")
+                .remove("live_scale_from_metadata")
                 .apply();
+        updateLiveProgress();
+    }
+
+    private void acceptLiveDuration(long durationMs, int source) {
+        if (durationMs < 5L * 60L * 1000L || durationMs > 24L * 60L * 60L * 1000L
+                || source != currentSource || source != webSource || liveScaleFromMetadata) return;
+        liveScaleDurationMs = durationMs;
+        liveScaleFromMetadata = true;
+        if (preferences != null) preferences.edit()
+                .putLong("live_scale_duration_ms", liveScaleDurationMs)
+                .putBoolean("live_scale_from_metadata", true)
+                .apply();
+        updateLiveProgress();
     }
 
     private void ensureSessionStartTime() {
@@ -1301,6 +1335,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
     private void updateElapsedView() {
         if (!liveSessionActive || elapsedView == null) return;
+        long anchor = liveStartEpochMs > 0L ? liveStartEpochMs : sessionStartEpochMs;
         if (liveStartEpochMs > 0L) {
             long seconds = Math.max(0L, (System.currentTimeMillis() - liveStartEpochMs) / 1000L);
             elapsedView.setText("LIVE  ·  " + formatTime(seconds));
@@ -1310,12 +1345,137 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         } else {
             elapsedView.setText("LIVE");
         }
+        if (anchor > 0L) updateLiveProgress();
+    }
+
+    private void updateLiveProgress() {
+        if (liveProgress == null) return;
+        long anchor = liveStartEpochMs > 0L ? liveStartEpochMs : sessionStartEpochMs;
+        if (!liveSessionActive || anchor <= 0L) {
+            liveProgress.setIndeterminate(false);
+            liveProgress.setProgress(0);
+            return;
+        }
+        long elapsed = Math.max(0L, System.currentTimeMillis() - anchor);
+        long scale = Math.max(1L, liveScaleDurationMs);
+        int progress = (int) Math.min(100L, (elapsed * 100L) / scale);
+        liveProgress.setIndeterminate(false);
+        liveProgress.setProgress(progress);
     }
 
     private static long extractLiveStartTimeMs(String body, int source) {
         Object parsed = parseJsonBody(body);
         if (parsed == null) return 0L;
         return findLiveStartTimeInTree(parsed, source);
+    }
+
+    private static long extractLiveDurationMs(String body, int source) {
+        Object parsed = parseJsonBody(body);
+        if (parsed == null) return 0L;
+        return findLiveDurationInTree(parsed, source);
+    }
+
+    private static long findLiveDurationInTree(Object node, int source) {
+        if (node instanceof JSONObject) {
+            JSONObject object = (JSONObject) node;
+            if (hasLocalLiveMetadataMarker(object, source)) {
+                String[] durationKeys = {
+                        "broadcast_duration_ms", "stream_duration_ms", "live_duration_ms",
+                        "total_duration_ms", "expected_duration_ms", "planned_duration_ms",
+                        "broadcast_duration_seconds", "stream_duration_seconds", "live_duration_seconds",
+                        "total_duration_seconds", "expected_duration_seconds", "planned_duration_seconds",
+                        "broadcast_duration", "stream_duration", "live_duration", "total_duration",
+                        "expected_duration", "planned_duration", "scheduled_duration", "duration_seconds"
+                };
+                for (String key : durationKeys) {
+                    long duration = parseDurationMillis(object.opt(key), key);
+                    if (isPlausibleLiveDuration(duration)) return duration;
+                }
+                // A generic duration is accepted only on an explicitly LIVE object that also has a start timestamp.
+                if (object.has("duration") && hasLiveStartField(object)) {
+                    long duration = parseDurationMillis(object.opt("duration"), "duration");
+                    if (isPlausibleLiveDuration(duration)) return duration;
+                }
+                long start = findStartOnObject(object);
+                String[] endKeys = {"planned_end_at", "scheduled_end_at", "expected_end_at", "broadcast_end_at", "stream_end_at", "live_end_at"};
+                for (String key : endKeys) {
+                    long end = parseTimestampMillis(object.opt(key));
+                    if (start > 0L && end > start) {
+                        long duration = end - start;
+                        if (isPlausibleLiveDuration(duration)) return duration;
+                    }
+                }
+            }
+            JSONArray names = object.names();
+            if (names != null) {
+                for (int i = 0; i < names.length(); i++) {
+                    long candidate = findLiveDurationInTree(object.opt(names.optString(i)), source);
+                    if (candidate > 0L) return candidate;
+                }
+            }
+        } else if (node instanceof JSONArray) {
+            JSONArray array = (JSONArray) node;
+            for (int i = 0; i < array.length(); i++) {
+                long candidate = findLiveDurationInTree(array.opt(i), source);
+                if (candidate > 0L) return candidate;
+            }
+        }
+        return 0L;
+    }
+
+    private static boolean hasLiveStartField(JSONObject object) {
+        String[] keys = {"live_started_at", "live_started_ts", "stream_started_at", "stream_started_ts",
+                "broadcast_started_at", "broadcast_started_ts", "actual_start_time", "actual_started_at", "started_at"};
+        for (String key : keys) if (object.has(key) && parseTimestampMillis(object.opt(key)) > 0L) return true;
+        return false;
+    }
+
+    private static long findStartOnObject(JSONObject object) {
+        String[] keys = {"live_started_at", "live_started_ts", "stream_started_at", "stream_started_ts",
+                "broadcast_started_at", "broadcast_started_ts", "actual_start_time", "actual_started_at", "started_at"};
+        for (String key : keys) {
+            long value = parseTimestampMillis(object.opt(key));
+            if (isPlausibleLiveStart(value)) return value;
+        }
+        return 0L;
+    }
+
+    private static long parseDurationMillis(Object value, String key) {
+        if (value == null || value == JSONObject.NULL) return 0L;
+        if (value instanceof Number) {
+            double raw = ((Number) value).doubleValue();
+            if (!Double.isFinite(raw) || raw <= 0d) return 0L;
+            if (key.endsWith("_ms") || raw > 86400d) return (long) raw;
+            return (long) (raw * 1000d);
+        }
+        String text = String.valueOf(value).trim();
+        if (text.isEmpty()) return 0L;
+        try {
+            if (text.matches("\\d{1,2}:\\d{2}(:\\d{2})?")) {
+                String[] parts = text.split(":");
+                long seconds = parts.length == 3
+                        ? Long.parseLong(parts[0]) * 3600L + Long.parseLong(parts[1]) * 60L + Long.parseLong(parts[2])
+                        : Long.parseLong(parts[0]) * 60L + Long.parseLong(parts[1]);
+                return seconds * 1000L;
+            }
+            if (text.matches("(?i)PT.*")) {
+                java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("(?i)PT(?:(\\d+(?:\\.\\d+)?)H)?(?:(\\d+(?:\\.\\d+)?)M)?(?:(\\d+(?:\\.\\d+)?)S)?").matcher(text);
+                if (matcher.matches()) {
+                    double hours = matcher.group(1) == null ? 0d : Double.parseDouble(matcher.group(1));
+                    double minutes = matcher.group(2) == null ? 0d : Double.parseDouble(matcher.group(2));
+                    double seconds = matcher.group(3) == null ? 0d : Double.parseDouble(matcher.group(3));
+                    return (long) ((hours * 3600d + minutes * 60d + seconds) * 1000d);
+                }
+            }
+            double raw = Double.parseDouble(text);
+            if (raw <= 0d) return 0L;
+            if (key.endsWith("_ms") || raw > 86400d) return (long) raw;
+            return (long) (raw * 1000d);
+        } catch (Exception ignored) { return 0L; }
+    }
+
+    private static boolean isPlausibleLiveDuration(long durationMs) {
+        return durationMs >= 5L * 60L * 1000L && durationMs <= 24L * 60L * 60L * 1000L;
     }
 
     private static long findLiveStartTimeInTree(Object node, int source) {
