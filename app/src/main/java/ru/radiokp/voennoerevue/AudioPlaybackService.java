@@ -414,7 +414,7 @@ public final class AudioPlaybackService extends Service {
                 }
                 postHlsDiagnostic(generation, playlistUrl, "PDT найден: " + dateText + " · sequence=" + sequenceValue);
                 handler.post(() -> {
-                    if (generation != streamGeneration || !currentUrl.equals(playlistUrl)) return;
+                    if (generation != streamGeneration) return;
                     PlaybackStateListener target = listener;
                     if (target != null) target.onLiveProgramDateTime(timestamp);
                 });
@@ -430,7 +430,7 @@ public final class AudioPlaybackService extends Service {
 
     private void postHlsDiagnostic(int generation, String playlistUrl, String diagnostic) {
         handler.post(() -> {
-            if (generation != streamGeneration || !currentUrl.equals(playlistUrl)) return;
+            if (generation != streamGeneration) return;
             PlaybackStateListener target = listener;
             if (target != null) target.onHlsDiagnostics(diagnostic);
         });
