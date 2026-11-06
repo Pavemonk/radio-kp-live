@@ -39,8 +39,9 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.Locale;
-import java.time.Instant;
-import java.time.format.DateTimeParseException;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.TimeZone;
 import java.util.Map;
 
 public final class AudioPlaybackService extends Service {
@@ -375,7 +376,15 @@ public final class AudioPlaybackService extends Service {
                 java.util.regex.Matcher pdt = java.util.regex.Pattern
                         .compile("(?m)^#EXT-X-PROGRAM-DATE-TIME:(.+?)\\s*$").matcher(manifest);
                 if (!pdt.find()) return;
-                long timestamp = Instant.parse(pdt.group(1).trim()).toEpochMilli();
+                String dateText = pdt.group(1).trim();
+                // Android 6 compatibility: parse the common UTC form without java.time APIs.
+                if (!dateText.endsWith("Z")) return;
+                String normalizedDate = dateText.replaceFirst("\\.\\d+(?=Z$)", "");
+                SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US);
+                dateFormat.setTimeZone(TimeZone.getTimeZone("UTC"));
+                Date parsedDate = dateFormat.parse(normalizedDate);
+                if (parsedDate == null) return;
+                long timestamp = parsedDate.getTime();
                 long now = System.currentTimeMillis();
                 if (timestamp <= 0L || timestamp > now + 60000L || now - timestamp > 24L * 60L * 60L * 1000L) return;
                 handler.post(() -> {
