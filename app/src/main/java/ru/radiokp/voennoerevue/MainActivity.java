@@ -691,21 +691,14 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
     private static final String AUTO_OPEN_VK_LIVE_SCRIPT = "(function(){try{" +
             "if(window.__radioKpLiveScan)return;window.__radioKpLiveScan=true;" +
-            "function norm(s){return String(s||'').replace(/\\s+/g,' ').trim().toLowerCase();}" +
             "function scan(){try{" +
             "var els=[].slice.call(document.querySelectorAll('a[href]'));" +
-            "for(var i=0;i<els.length;i++){var a=els[i];if(!/(?:video|live)-\\-?\\d+_\\d+/i.test(a.href))continue;" +
-            "var p=a.closest('article,[data-testid],[class*=VideoCard],[class*=video-card]')||a;" +
-            "for(var d=0;p&&d<7;d++,p=p.parentElement){" +
-            "var t=norm((a.innerText||'')+' '+(p.innerText||p.textContent||''));" +
-            "if(t.length>1600)continue;" +
-            "var live=/прям.{0,12}эфир|сейчас в эфире|в эфире|live now|live broadcast/.test(t);" +
-            "var radio=/радио\\s+комсомольская\\s+правда|радио\\s+«комсомольская\\s+правда»/.test(t);" +
-            "var channelPage=/\\/@radiokp\\/lives(?:[/?#]|$)/i.test(location.href);" +
-            "if(live&&(radio||channelPage)){if(window.AudioBridge)window.AudioBridge.onSelectedVkVideoUrl(a.href);a.click();return true;}}}" +
+            "for(var i=0;i<els.length;i++){var a=els[i],p=a.closest('article,[data-testid],[class*=VideoCard],[class*=video-card]')||a;" +
+            "var t=((a.innerText||'')+' '+(p.innerText||'')).toLowerCase();" +
+            "if((/прям.{0,8}эфир|сейчас в эфире|live now|live broadcast/.test(t))&&(/video-|live-/.test(a.href))){if(window.AudioBridge)window.AudioBridge.onSelectedVkVideoUrl(a.href);a.click();return true;}}" +
             "}catch(e){}return false;}" +
             "var tries=0;function tick(){if(scan())return;if(++tries<45)setTimeout(tick,1000);else if(window.AudioBridge)window.AudioBridge.onLiveScanFailed();}" +
-            "setTimeout(tick,1200);" +
+            "setTimeout(tick,1300);" +
             "}catch(e){}})();";
 
     private static final String INSTALL_RUTUBE_HOOK_SCRIPT = "(function(){try{if(window.__radioKpRutubeHook)return;window.__radioKpRutubeHook=true;" +
