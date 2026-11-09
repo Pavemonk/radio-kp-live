@@ -700,7 +700,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             "for(var d=0;p&&d<10;d++,p=p.parentElement){" +
             "var t=norm(p.innerText||p.textContent);" +
             "var a=p.matches&&p.matches('a[href*=\\\"/video-\\\"],a[href*=\\\"/live-\\\"]')?p:p.querySelector&&p.querySelector('a[href*=\\\"/video-\\\"],a[href*=\\\"/live-\\\"]');" +
-            "if(a&&/\\/(video-|live-)/.test(a.href)&&/радио\\s+комсомольская\\s+правда|радио\\s+«комсомольская\\s+правда»/.test(t)){a.click();return true;}}}" +
+            "if(a&&/\\/(video-|live-)/.test(a.href)&&/радио\\s+комсомольская\\s+правда|радио\\s+«комсомольская\\s+правда»/.test(t)){if(window.AudioBridge)window.AudioBridge.onSelectedVkVideoUrl(a.href);a.click();return true;}}}" +
             "}catch(e){}return false;}" +
             "var tries=0;function tick(){if(scan())return;if(++tries<45)setTimeout(tick,1000);else if(window.AudioBridge)window.AudioBridge.onLiveScanFailed();}" +
             "setTimeout(tick,1200);" +
@@ -729,6 +729,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private final class StreamBridge {
         private final int source;
         StreamBridge(int source) { this.source = source; }
+        @JavascriptInterface public void onSelectedVkVideoUrl(String url) {
+            if (source != SOURCE_VK || source != currentSource || source != webSource || !isSelectedVkVideoPage(url)) return;
+            currentPageUrl = url;
+        }
         @JavascriptInterface public void onLiveScanFailed() {
             if (source != currentSource || source != webSource || source != SOURCE_VK || streamStarted) return;
             runOnUiThread(() -> {
