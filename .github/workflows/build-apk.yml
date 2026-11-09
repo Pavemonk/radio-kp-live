@@ -1,5 +1,6 @@
 
 name: Build Android APK
+# Build verification for VK scanner recovery 0.7.16
 
 on:
   push:
