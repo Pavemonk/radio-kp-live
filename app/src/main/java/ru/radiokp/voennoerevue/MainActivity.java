@@ -692,11 +692,12 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             "function liveBadge(el){var t=norm(el.innerText||el.textContent||el.getAttribute('aria-label')||el.getAttribute('title'));" +
             "return /^(live|в эфире|сейчас в эфире|эфир идет|эфир идёт|live now)$/.test(t);}" +
             "function scan(){try{" +
-            "var nodes=[].slice.call(document.querySelectorAll('[class*=live],[data-testid*=live],[aria-label],[title],span,div'));" +
+            "var nodes=[].slice.call(document.querySelectorAll('[class*=live],[data-testid*=live],[aria-label],[title]'));" +
             "for(var i=0;i<nodes.length;i++){if(!liveBadge(nodes[i]))continue;var p=nodes[i];" +
-            "for(var d=0;p&&d<9;d++,p=p.parentElement){" +
+            "for(var d=0;p&&d<10;d++,p=p.parentElement){" +
+            "var t=norm(p.innerText||p.textContent);" +
             "var a=p.matches&&p.matches('a[href*=\\\"/video-\\\"],a[href*=\\\"/live-\\\"]')?p:p.querySelector&&p.querySelector('a[href*=\\\"/video-\\\"],a[href*=\\\"/live-\\\"]');" +
-            "if(a&&/\\/(video-|live-)/.test(a.href)){a.click();return true;}}}" +
+            "if(a&&/\\/(video-|live-)/.test(a.href)&&/радио\\s+комсомольская\\s+правда|радио\\s+«комсомольская\\s+правда»/.test(t)){a.click();return true;}}}" +
             "}catch(e){}return false;}" +
             "var tries=0;function tick(){if(scan())return;if(++tries<45)setTimeout(tick,1000);else if(window.AudioBridge)window.AudioBridge.onLiveScanFailed();}" +
             "setTimeout(tick,1200);" +
@@ -797,13 +798,13 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     private static boolean isVkPostLiveObject(JSONObject object) {
+        String status = object.optString("live_status", "").toLowerCase(Locale.ROOT);
+        if ("post_live".equals(status) || "ended".equals(status) || "finished".equals(status)
+                || "recording".equals(status) || "offline".equals(status)) return true;
         Object live = object.opt("live");
-        if (live instanceof Number && ((Number) live).intValue() == 3) return true;
-        String liveText = String.valueOf(live);
-        if ("3".equals(liveText) || "post_live".equalsIgnoreCase(object.optString("live_status", ""))
-                || "ended".equalsIgnoreCase(object.optString("live_status", ""))
-                || "finished".equalsIgnoreCase(object.optString("live_status", ""))
-                || "recording".equalsIgnoreCase(object.optString("live_status", ""))) return true;
+        if (object.has("live") && (Boolean.FALSE.equals(live)
+                || "false".equalsIgnoreCase(String.valueOf(live))
+                || "0".equals(String.valueOf(live)))) return true;
         Object isLive = object.opt("is_live");
         if (Boolean.FALSE.equals(isLive) || "false".equalsIgnoreCase(String.valueOf(isLive))
                 || "0".equals(String.valueOf(isLive))) return object.has("hls_live");
