@@ -692,15 +692,17 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private static final String AUTO_OPEN_VK_LIVE_SCRIPT = "(function(){try{" +
             "if(window.__radioKpLiveScan)return;window.__radioKpLiveScan=true;" +
             "function norm(s){return String(s||'').replace(/\\s+/g,' ').trim().toLowerCase();}" +
-            "function liveBadge(el){var t=norm(el.innerText||el.textContent||el.getAttribute('aria-label')||el.getAttribute('title'));" +
-            "return /^(live|в эфире|сейчас в эфире|эфир идет|эфир идёт|live now)$/.test(t);}" +
             "function scan(){try{" +
-            "var nodes=[].slice.call(document.querySelectorAll('[class*=live],[data-testid*=live],[aria-label],[title]'));" +
-            "for(var i=0;i<nodes.length;i++){if(!liveBadge(nodes[i]))continue;var p=nodes[i];" +
-            "for(var d=0;p&&d<10;d++,p=p.parentElement){" +
-            "var t=norm(p.innerText||p.textContent);" +
-            "var a=p.matches&&p.matches('a[href*=\\\"/video-\\\"],a[href*=\\\"/live-\\\"]')?p:p.querySelector&&p.querySelector('a[href*=\\\"/video-\\\"],a[href*=\\\"/live-\\\"]');" +
-            "if(a&&/\\/(video-|live-)/.test(a.href)&&/радио\\s+комсомольская\\s+правда|радио\\s+«комсомольская\\s+правда»/.test(t)){if(window.AudioBridge)window.AudioBridge.onSelectedVkVideoUrl(a.href);a.click();return true;}}}" +
+            "var els=[].slice.call(document.querySelectorAll('a[href]'));" +
+            "for(var i=0;i<els.length;i++){var a=els[i];if(!/(?:video|live)-\\-?\\d+_\\d+/i.test(a.href))continue;" +
+            "var p=a.closest('article,[data-testid],[class*=VideoCard],[class*=video-card]')||a;" +
+            "for(var d=0;p&&d<7;d++,p=p.parentElement){" +
+            "var t=norm((a.innerText||'')+' '+(p.innerText||p.textContent||''));" +
+            "if(t.length>1600)continue;" +
+            "var live=/прям.{0,12}эфир|сейчас в эфире|в эфире|live now|live broadcast/.test(t);" +
+            "var radio=/радио\\s+комсомольская\\s+правда|радио\\s+«комсомольская\\s+правда»/.test(t);" +
+            "var channelPage=/\\/@radiokp\\/lives(?:[/?#]|$)/i.test(location.href);" +
+            "if(live&&(radio||channelPage)){if(window.AudioBridge)window.AudioBridge.onSelectedVkVideoUrl(a.href);a.click();return true;}}}" +
             "}catch(e){}return false;}" +
             "var tries=0;function tick(){if(scan())return;if(++tries<45)setTimeout(tick,1000);else if(window.AudioBridge)window.AudioBridge.onLiveScanFailed();}" +
             "setTimeout(tick,1200);" +
@@ -1178,7 +1180,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         try {
             Uri uri = Uri.parse(url);
             String path = uri.getPath() == null ? "" : uri.getPath();
-            if (Pattern.compile("^/(?:video|live)-\\-?\\d+_\\d+(?:/|$)", Pattern.CASE_INSENSITIVE).matcher(path).find()) return true;
+            if (Pattern.compile("(?:^|/)(?:video|live)-\\-?\\d+_\\d+(?:[/?#]|$)", Pattern.CASE_INSENSITIVE).matcher(url).find()) return true;
             if (path.endsWith("/video_ext.php")) {
                 return uri.getQueryParameter("oid") != null && uri.getQueryParameter("id") != null;
             }
