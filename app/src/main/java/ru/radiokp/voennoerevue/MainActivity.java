@@ -629,7 +629,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 });
             }
             if (liveDurationMs > 0L) runOnUiThread(() -> acceptLiveDuration(liveDurationMs, source));
-            ArrayList<String> resolved = source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body);
+            boolean selectedVkVideo = source != SOURCE_VK || isSelectedVkVideoPage(currentPageUrl);
+            ArrayList<String> resolved = selectedVkVideo
+                    ? (source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body))
+                    : new ArrayList<>();
             ArrayList<String> dashResolved = source == SOURCE_RUTUBE ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
             if (!resolved.isEmpty() || !dashResolved.isEmpty()) {
                 handleStreamResolved(resolved, dashResolved, source, liveStartMs);
@@ -737,6 +740,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         }
         @JavascriptInterface public void onPossibleStreamText(String body) {
             if (body == null || body.length() > 4 * 1024 * 1024 || source != currentSource || source != webSource) return;
+            // VK exposes the same discover method for several players on a feed page.
+            // Only accept a result after navigation to one specific video/live page.
+            if (source == SOURCE_VK && !isSelectedVkVideoPage(currentPageUrl)) return;
             ArrayList<String> streams = source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body);
             ArrayList<String> dashStreams = source == SOURCE_RUTUBE ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
             long liveStartMs = (!streams.isEmpty() || !dashStreams.isEmpty())
@@ -1161,6 +1167,19 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
     private static boolean isRutubeHost(String host) {
         return host != null && (host.equalsIgnoreCase("rutube.ru") || host.toLowerCase(Locale.ROOT).endsWith(".rutube.ru"));
+    }
+
+    private boolean isSelectedVkVideoPage(String url) {
+        if (url == null) return false;
+        try {
+            Uri uri = Uri.parse(url);
+            String path = uri.getPath() == null ? "" : uri.getPath();
+            if (Pattern.compile("^/(?:video|live)-\\-?\\d+_\\d+(?:/|$)", Pattern.CASE_INSENSITIVE).matcher(path).find()) return true;
+            if (path.endsWith("/video_ext.php")) {
+                return uri.getQueryParameter("oid") != null && uri.getQueryParameter("id") != null;
+            }
+        } catch (Exception ignored) { }
+        return false;
     }
 
     private boolean isVkPage(String url) {
