@@ -695,7 +695,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             "var nodes=[].slice.call(document.querySelectorAll('[class*=live],[data-testid*=live],[aria-label],[title],span,div'));" +
             "for(var i=0;i<nodes.length;i++){if(!liveBadge(nodes[i]))continue;var p=nodes[i];" +
             "for(var d=0;p&&d<9;d++,p=p.parentElement){" +
-            "var a=p.matches&&p.matches('a[href*=/video-],a[href*=/live-]')?p:p.querySelector&&p.querySelector('a[href*=/video-],a[href*=/live-]');" +
+            "var a=p.matches&&p.matches('a[href*=\\\"/video-\\\"],a[href*=\\\"/live-\\\"]')?p:p.querySelector&&p.querySelector('a[href*=\\\"/video-\\\"],a[href*=\\\"/live-\\\"]');" +
             "if(a&&/\\/(video-|live-)/.test(a.href)){a.click();return true;}}}" +
             "}catch(e){}return false;}" +
             "var tries=0;function tick(){if(scan())return;if(++tries<45)setTimeout(tick,1000);else if(window.AudioBridge)window.AudioBridge.onLiveScanFailed();}" +
