@@ -914,7 +914,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             char c = text.charAt(i);
             if (inString) {
                 if (escaped) escaped = false;
-                else if (c == '\\\\') escaped = true;
+                else if (c == '\\') escaped = true;
                 else if (c == '"') inString = false;
                 continue;
             }
