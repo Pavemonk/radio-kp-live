@@ -859,9 +859,6 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         if (Boolean.FALSE.equals(isLivestream) || "false".equalsIgnoreCase(String.valueOf(isLivestream))
                 || "0".equals(String.valueOf(isLivestream))) return -1;
 
-        Object isBroadcast = object.opt("is_broadcast");
-        if (Boolean.TRUE.equals(isBroadcast) || "true".equalsIgnoreCase(String.valueOf(isBroadcast))
-                || "1".equals(String.valueOf(isBroadcast))) return 1;
         return 0;
     }
 
