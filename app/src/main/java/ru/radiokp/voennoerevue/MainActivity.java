@@ -87,6 +87,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private volatile int currentSource = SOURCE_VK;
     private volatile int webSource = SOURCE_VK;
     private volatile String currentPageUrl = VK_LIVES_URL;
+    // True only after the VK feed scanner selected a card with an explicit LIVE badge.
+    private volatile boolean vkLiveCardSelected = false;
     private volatile boolean streamStarted = false;
     private boolean autoStart = true;
     private boolean autoFailover = true;
@@ -372,6 +374,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         }
         attemptedSourcesMask |= bit;
         currentSource = source;
+        vkLiveCardSelected = false;
         streamStarted = false;
         liveSessionActive = liveStartEpochMs > 0L || sessionStartEpochMs > 0L;
         isPlaying = false;
@@ -616,11 +619,14 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             InputStream input = code >= 400 ? connection.getErrorStream() : connection.getInputStream();
             byte[] bytes = input == null ? new byte[0] : readAll(input, 4 * 1024 * 1024);
             String body = new String(bytes, StandardCharsets.UTF_8);
+            boolean selectedVkVideo = source != SOURCE_VK
+                    || (vkLiveCardSelected && isSelectedVkVideoPage(currentPageUrl));
             boolean selectedRutubeMetadata = source != SOURCE_RUTUBE
                     || !url.contains("/api/video/")
                     || isSelectedRutubeVideoMetadataUrl(url);
-            long liveStartMs = selectedRutubeMetadata ? extractLiveStartTimeMs(body, source) : 0L;
-            long liveDurationMs = selectedRutubeMetadata ? extractLiveDurationMs(body, source) : 0L;
+            boolean selectedSourceMetadata = selectedVkVideo && selectedRutubeMetadata;
+            long liveStartMs = selectedSourceMetadata ? extractLiveStartTimeMs(body, source) : 0L;
+            long liveDurationMs = selectedSourceMetadata ? extractLiveDurationMs(body, source) : 0L;
             if (source == SOURCE_RUTUBE && selectedRutubeMetadata) {
                 String diagnostic = buildRutubeApiDiagnostic(url, code, body, liveStartMs, liveDurationMs);
                 runOnUiThread(() -> {
@@ -629,8 +635,11 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 });
             }
             if (liveDurationMs > 0L) runOnUiThread(() -> acceptLiveDuration(liveDurationMs, source));
-            ArrayList<String> resolved = source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body);
-            ArrayList<String> dashResolved = source == SOURCE_RUTUBE ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
+            ArrayList<String> resolved = selectedSourceMetadata
+                    ? (source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body))
+                    : new ArrayList<>();
+            ArrayList<String> dashResolved = source == SOURCE_RUTUBE && selectedSourceMetadata
+                    ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
             if (!resolved.isEmpty() || !dashResolved.isEmpty()) {
                 handleStreamResolved(resolved, dashResolved, source, liveStartMs);
             } else if (liveStartMs > 0L) {
@@ -686,12 +695,23 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             "XMLHttpRequest.prototype.send=function(){this.addEventListener('load',function(){try{report(this.responseText)}catch(e){}});return se.apply(this,arguments)};" +
             "}catch(e){}})();";
 
-    private static final String AUTO_OPEN_VK_LIVE_SCRIPT = "(function(){try{setTimeout(function(){" +
-            "var els=[].slice.call(document.querySelectorAll('a[href]'));" +
-            "for(var i=0;i<els.length;i++){var a=els[i],p=a.closest('article,[data-testid],[class*=VideoCard],[class*=video-card]')||a;" +
-            "var t=((a.innerText||'')+' '+(p.innerText||'')).toLowerCase();" +
-            "if((/прям.{0,8}эфир|сейчас в эфире|live now|live broadcast/.test(t))&&(/video-|live-/.test(a.href))){a.click();return;}}" +
-            "},1300)}catch(e){}})();";
+    private static final String AUTO_OPEN_VK_LIVE_SCRIPT = "(function(){try{" +
+            "if(window.__radioKpLiveScan)return;window.__radioKpLiveScan=true;" +
+            "function norm(s){return String(s||'').replace(/\\s+/g,' ').trim().toLowerCase();}" +
+            "function liveBadge(el){var t=norm(el.innerText||el.textContent||el.getAttribute('aria-label')||el.getAttribute('title'));" +
+            "return /^(live|в эфире|сейчас в эфире|эфир идет|эфир идёт|live now)$/.test(t);}" +
+            "function scan(){try{" +
+            "var nodes=[].slice.call(document.querySelectorAll('[class*=live],[data-testid*=live],[aria-label],[title]'));" +
+            "for(var i=0;i<nodes.length;i++){if(!liveBadge(nodes[i]))continue;var p=nodes[i];" +
+            "for(var d=0;p&&d<10;d++,p=p.parentElement){" +
+            "var t=norm(p.innerText||p.textContent);" +
+            "var a=p.matches&&p.matches('a[href*=\\\"/video-\\\"],a[href*=\\\"/live-\\\"]')?p:p.querySelector&&p.querySelector('a[href*=\\\"/video-\\\"],a[href*=\\\"/live-\\\"]');" +
+            "if(a&&t.length<1800&&/\\/(video-|live-)/.test(a.href)&&/радио\\s+комсомольская\\s+правда|радио\\s+«комсомольская\\s+правда»/.test(t)){" +
+            "if(window.AudioBridge)window.AudioBridge.onSelectedVkVideoUrl(a.href);a.click();return true;}}}" +
+            "}catch(e){}return false;}" +
+            "var tries=0;function tick(){if(scan())return;if(++tries<28)setTimeout(tick,1000);else if(window.AudioBridge)window.AudioBridge.onLiveScanFailed();}" +
+            "setTimeout(tick,1300);" +
+            "}catch(e){}})();";
 
     private static final String INSTALL_RUTUBE_HOOK_SCRIPT = "(function(){try{if(window.__radioKpRutubeHook)return;window.__radioKpRutubeHook=true;" +
             "function hideVideo(){try{document.querySelectorAll('video').forEach(function(v){v.style.setProperty('position','fixed','important');v.style.setProperty('left','-5px','important');v.style.setProperty('top','-5px','important');v.style.setProperty('width','1px','important');v.style.setProperty('height','1px','important');v.style.setProperty('opacity','0.001','important');v.style.setProperty('pointer-events','none','important');v.controls=false;v.muted=true;try{v.pause();v.removeAttribute('autoplay')}catch(e){}})}catch(e){}}" +
@@ -716,8 +736,23 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private final class StreamBridge {
         private final int source;
         StreamBridge(int source) { this.source = source; }
+        @JavascriptInterface public void onSelectedVkVideoUrl(String url) {
+            if (source != SOURCE_VK || source != currentSource || source != webSource || !isSelectedVkVideoPage(url)) return;
+            vkLiveCardSelected = true;
+            currentPageUrl = url;
+        }
+        @JavascriptInterface public void onLiveScanFailed() {
+            if (source != SOURCE_VK || source != currentSource || source != webSource || streamStarted) return;
+            runOnUiThread(() -> {
+                if (currentSource == SOURCE_VK && !streamStarted) {
+                    statusView.setText("Не нашёл карточку Радио КП с явной меткой LIVE. Запись вместо эфира запускать не буду.");
+                    if (sourcePageButton != null) sourcePageButton.setVisibility(View.VISIBLE);
+                }
+            });
+        }
         @JavascriptInterface public void onPossibleStreamText(String body) {
             if (body == null || body.length() > 4 * 1024 * 1024 || source != currentSource || source != webSource) return;
+            if (source == SOURCE_VK && (!vkLiveCardSelected || !isSelectedVkVideoPage(currentPageUrl))) return;
             ArrayList<String> streams = source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body);
             ArrayList<String> dashStreams = source == SOURCE_RUTUBE ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
             long liveStartMs = (!streams.isEmpty() || !dashStreams.isEmpty())
@@ -737,15 +772,58 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         if (body == null || body.isEmpty()) return new ArrayList<>(urls);
         Object parsed = parseJsonBody(body);
         if (parsed != null) {
-            addHlsCandidate(findKey(parsed, "hls_live"), SOURCE_VK, urls);
-            addHlsCandidate(findKey(parsed, "hls_live_playback"), SOURCE_VK, urls);
-            collectM3u8Urls(parsed, SOURCE_VK, urls);
-        }
-        Matcher matcher = Pattern.compile("https?://[^\\s\"']+?\\.m3u8(?:\\?[^\\s\"']*)?", Pattern.CASE_INSENSITIVE).matcher(body);
-        while (matcher.find() && urls.size() < MAX_HLS_CANDIDATES) {
-            addHlsCandidate(matcher.group(), SOURCE_VK, urls);
+            collectVkLiveHlsUrls(parsed, urls);
+        } else {
+            // Non-JSON fallback: accept only the explicit live-edge field.
+            boolean ended = Pattern.compile("[\\\"']live[\\\"']\\s*:\\s*(?:false|0)", Pattern.CASE_INSENSITIVE).matcher(body).find()
+                    || Pattern.compile("[\\\"']live_status[\\\"']\\s*:\\s*[\\\"'](?:post_live|ended|finished|recording|offline)", Pattern.CASE_INSENSITIVE).matcher(body).find();
+            if (!ended) {
+                Matcher matcher = Pattern.compile("[\\\"']hls_live[\\\"']\\s*:\\s*[\\\"'](https?://[^\\\"']+?\\.m3u8[^\\\"']*)", Pattern.CASE_INSENSITIVE).matcher(body);
+                while (matcher.find() && urls.size() < MAX_HLS_CANDIDATES) {
+                    addHlsCandidate(matcher.group(1), SOURCE_VK, urls);
+                }
+            }
         }
         return new ArrayList<>(urls);
+    }
+
+    /** Ignore archival/replay data and generic HLS URLs from other VK feed cards. */
+    private static void collectVkLiveHlsUrls(Object node, LinkedHashSet<String> urls) {
+        if (node instanceof JSONObject) {
+            JSONObject object = (JSONObject) node;
+            if (isVkPostLiveObject(object)) return;
+            Object candidate = object.opt("hls_live");
+            if (candidate instanceof String) addHlsCandidate((String) candidate, SOURCE_VK, urls);
+            JSONArray names = object.names();
+            if (names != null) {
+                for (int i = 0; i < names.length() && urls.size() < MAX_HLS_CANDIDATES; i++) {
+                    String name = names.optString(i);
+                    if ("hls_live_playback".equalsIgnoreCase(name)) continue;
+                    collectVkLiveHlsUrls(object.opt(name), urls);
+                }
+            }
+        } else if (node instanceof JSONArray) {
+            JSONArray array = (JSONArray) node;
+            for (int i = 0; i < array.length() && urls.size() < MAX_HLS_CANDIDATES; i++) {
+                collectVkLiveHlsUrls(array.opt(i), urls);
+            }
+        }
+    }
+
+    private static boolean isVkPostLiveObject(JSONObject object) {
+        String status = object.optString("live_status", "").toLowerCase(Locale.ROOT);
+        if ("post_live".equals(status) || "ended".equals(status) || "finished".equals(status)
+                || "recording".equals(status) || "offline".equals(status)) return true;
+        if (!object.has("hls_live")) return false;
+        Object live = object.opt("live");
+        if (Boolean.FALSE.equals(live) || "false".equalsIgnoreCase(String.valueOf(live))
+                || "0".equals(String.valueOf(live))) return true;
+        Object isLive = object.opt("is_live");
+        if (Boolean.FALSE.equals(isLive) || "false".equalsIgnoreCase(String.valueOf(isLive))
+                || "0".equals(String.valueOf(isLive))) return true;
+        Object isLivestream = object.opt("is_livestream");
+        return Boolean.FALSE.equals(isLivestream) || "false".equalsIgnoreCase(String.valueOf(isLivestream))
+                || "0".equals(String.valueOf(isLivestream));
     }
 
     private static ArrayList<String> extractRutubeLiveHlsUrls(String body) {
@@ -1095,6 +1173,19 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
     private static boolean isRutubeHost(String host) {
         return host != null && (host.equalsIgnoreCase("rutube.ru") || host.toLowerCase(Locale.ROOT).endsWith(".rutube.ru"));
+    }
+
+    private boolean isSelectedVkVideoPage(String url) {
+        if (url == null) return false;
+        try {
+            Uri uri = Uri.parse(url);
+            String path = uri.getPath() == null ? "" : uri.getPath();
+            if (Pattern.compile("^/(?:video|live)-\\-?\\d+_\\d+(?:/|$)", Pattern.CASE_INSENSITIVE).matcher(path).find()) return true;
+            if (path.endsWith("/video_ext.php")) {
+                return uri.getQueryParameter("oid") != null && uri.getQueryParameter("id") != null;
+            }
+        } catch (Exception ignored) { }
+        return false;
     }
 
     private boolean isVkPage(String url) {
