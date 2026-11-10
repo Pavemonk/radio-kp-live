@@ -626,6 +626,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             byte[] bytes = input == null ? new byte[0] : readAll(input, 4 * 1024 * 1024);
             String body = new String(bytes, StandardCharsets.UTF_8);
             boolean selectedVkVideo = source != SOURCE_VK
+                    || isVkLiveFeedPage(currentPageUrl)
                     || (vkLiveCardSelected && isSelectedVkVideoPage(currentPageUrl));
             boolean selectedRutubeMetadata = source != SOURCE_RUTUBE
                     || !url.contains("/api/video/")
@@ -757,7 +758,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         }
         @JavascriptInterface public void onPossibleStreamText(String body) {
             if (body == null || body.length() > 4 * 1024 * 1024 || source != currentSource || source != webSource) return;
-            if (source == SOURCE_VK && (!vkLiveCardSelected || !isSelectedVkVideoPage(currentPageUrl))) return;
+            if (source == SOURCE_VK && !isVkLiveFeedPage(currentPageUrl)
+                    && (!vkLiveCardSelected || !isSelectedVkVideoPage(currentPageUrl))) return;
             ArrayList<String> streams = source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body);
             ArrayList<String> dashStreams = source == SOURCE_RUTUBE ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
             long liveStartMs = (!streams.isEmpty() || !dashStreams.isEmpty())
@@ -1209,6 +1211,17 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
     private static boolean isRutubeHost(String host) {
         return host != null && (host.equalsIgnoreCase("rutube.ru") || host.toLowerCase(Locale.ROOT).endsWith(".rutube.ru"));
+    }
+
+    private boolean isVkLiveFeedPage(String url) {
+        if (url == null) return false;
+        try {
+            Uri uri = Uri.parse(url);
+            String host = uri.getHost();
+            String path = uri.getPath() == null ? "" : uri.getPath();
+            return isVkPage(url) && path.replaceAll("/+$", "").equalsIgnoreCase("/@radiokp/lives");
+        } catch (Exception ignored) { }
+        return false;
     }
 
     private boolean isSelectedVkVideoPage(String url) {
