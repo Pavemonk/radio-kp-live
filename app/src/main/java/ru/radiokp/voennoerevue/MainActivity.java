@@ -777,12 +777,13 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         if (body == null || body.isEmpty()) return new ArrayList<>(urls);
         Object parsed = parseJsonBody(body);
         if (parsed != null) {
-            collectVkLiveHlsUrls(parsed, urls);
+            collectVkLiveHlsUrls(parsed, urls, false);
         } else {
-            // Non-JSON fallback: accept only the explicit live-edge field.
-            boolean ended = Pattern.compile("[\\\"']live[\\\"']\\s*:\\s*(?:false|0)", Pattern.CASE_INSENSITIVE).matcher(body).find()
-                    || Pattern.compile("[\\\"']live_status[\\\"']\\s*:\\s*[\\\"'](?:post_live|ended|finished|recording|offline)", Pattern.CASE_INSENSITIVE).matcher(body).find();
-            if (!ended) {
+            // Plain-text fallback is also LIVE-only: a URL or upload date alone is insufficient.
+            boolean explicitLive = Pattern.compile("[\\\"']live[\\\"']\\s*:\\s*2(?:\\s*[,}])", Pattern.CASE_INSENSITIVE).matcher(body).find()
+                    || Pattern.compile("[\\\"']live_status[\\\"']\\s*:\\s*[\\\"']started[\\\"']", Pattern.CASE_INSENSITIVE).matcher(body).find()
+                    || Pattern.compile("[\\\"'](?:is_live|is_livestream)[\\\"']\\s*:\\s*true", Pattern.CASE_INSENSITIVE).matcher(body).find();
+            if (explicitLive) {
                 Matcher matcher = Pattern.compile("[\\\"']hls_live[\\\"']\\s*:\\s*[\\\"'](https?://[^\\\"']+?\\.m3u8[^\\\"']*)", Pattern.CASE_INSENSITIVE).matcher(body);
                 while (matcher.find() && urls.size() < MAX_HLS_CANDIDATES) {
                     addHlsCandidate(matcher.group(1), SOURCE_VK, urls);
@@ -792,46 +793,76 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         return new ArrayList<>(urls);
     }
 
-    /** Ignore archival/replay data and generic HLS URLs from other VK feed cards. */
-    private static void collectVkLiveHlsUrls(Object node, LinkedHashSet<String> urls) {
+    /**
+     * Walks the VK response while carrying an explicit LIVE marker from parent objects.
+     * VK player data uses live=2 for an active broadcast and live=3 for a finished one.
+     * Generic HLS and hls_live_playback fields are not accepted as proof of a live edge.
+     */
+    private static void collectVkLiveHlsUrls(Object node, LinkedHashSet<String> urls, boolean inheritedLive) {
         if (node instanceof JSONObject) {
             JSONObject object = (JSONObject) node;
-            if (isVkPostLiveObject(object)) return;
+            int state = getVkLiveState(object);
+            if (state < 0) return;
+            boolean active = inheritedLive || state > 0;
             Object candidate = object.opt("hls_live");
-            if (candidate instanceof String) addHlsCandidate((String) candidate, SOURCE_VK, urls);
+            if (active && candidate instanceof String) {
+                addHlsCandidate((String) candidate, SOURCE_VK, urls);
+            }
             JSONArray names = object.names();
             if (names != null) {
                 for (int i = 0; i < names.length() && urls.size() < MAX_HLS_CANDIDATES; i++) {
                     String name = names.optString(i);
                     if ("hls_live_playback".equalsIgnoreCase(name)) continue;
-                    collectVkLiveHlsUrls(object.opt(name), urls);
+                    collectVkLiveHlsUrls(object.opt(name), urls, active);
                 }
             }
         } else if (node instanceof JSONArray) {
             JSONArray array = (JSONArray) node;
             for (int i = 0; i < array.length() && urls.size() < MAX_HLS_CANDIDATES; i++) {
-                collectVkLiveHlsUrls(array.opt(i), urls);
+                collectVkLiveHlsUrls(array.opt(i), urls, inheritedLive);
             }
         }
     }
 
-    private static boolean isVkPostLiveObject(JSONObject object) {
+    /** Returns 1 for an explicit active broadcast, -1 for ended/upcoming/failed, and 0 if unknown. */
+    private static int getVkLiveState(JSONObject object) {
         String status = object.optString("live_status", "").toLowerCase(Locale.ROOT);
-        if ("post_live".equals(status) || "ended".equals(status) || "finished".equals(status)
-                || "recording".equals(status) || "offline".equals(status)) return true;
+        if ("started".equals(status) || "is_live".equals(status)) return 1;
+        if ("post_live".equals(status) || "was_live".equals(status) || "ended".equals(status)
+                || "finished".equals(status) || "recording".equals(status) || "offline".equals(status)
+                || "failed".equals(status) || "upcoming".equals(status) || "waiting".equals(status)
+                || "not_live".equals(status)) return -1;
+
         Object live = object.opt("live");
-        String liveText = String.valueOf(live);
-        // VK's live=3 marks a post-live recording, not an active broadcast.
-        if ((live instanceof Number && ((Number) live).intValue() == 3) || "3".equals(liveText)) return true;
-        if (!object.has("hls_live")) return false;
-        if (Boolean.FALSE.equals(live) || "false".equalsIgnoreCase(liveText)
-                || "0".equals(liveText)) return true;
+        if (live instanceof Number) {
+            int value = ((Number) live).intValue();
+            if (value == 3 || value == 1 || value == 0) return -1;
+            if (value == 2) return 1;
+        } else if (live instanceof Boolean) {
+            return (Boolean) live ? 1 : -1;
+        } else if (live != null) {
+            String value = String.valueOf(live);
+            if ("3".equals(value) || "1".equals(value) || "0".equals(value)
+                    || "false".equalsIgnoreCase(value)) return -1;
+            if ("2".equals(value) || "true".equalsIgnoreCase(value)) return 1;
+        }
+
         Object isLive = object.opt("is_live");
+        if (Boolean.TRUE.equals(isLive) || "true".equalsIgnoreCase(String.valueOf(isLive))
+                || "1".equals(String.valueOf(isLive))) return 1;
         if (Boolean.FALSE.equals(isLive) || "false".equalsIgnoreCase(String.valueOf(isLive))
-                || "0".equals(String.valueOf(isLive))) return true;
+                || "0".equals(String.valueOf(isLive))) return -1;
+
         Object isLivestream = object.opt("is_livestream");
-        return Boolean.FALSE.equals(isLivestream) || "false".equalsIgnoreCase(String.valueOf(isLivestream))
-                || "0".equals(String.valueOf(isLivestream));
+        if (Boolean.TRUE.equals(isLivestream) || "true".equalsIgnoreCase(String.valueOf(isLivestream))
+                || "1".equals(String.valueOf(isLivestream))) return 1;
+        if (Boolean.FALSE.equals(isLivestream) || "false".equalsIgnoreCase(String.valueOf(isLivestream))
+                || "0".equals(String.valueOf(isLivestream))) return -1;
+
+        Object isBroadcast = object.opt("is_broadcast");
+        if (Boolean.TRUE.equals(isBroadcast) || "true".equalsIgnoreCase(String.valueOf(isBroadcast))
+                || "1".equals(String.valueOf(isBroadcast))) return 1;
+        return 0;
     }
 
     private static ArrayList<String> extractRutubeLiveHlsUrls(String body) {
