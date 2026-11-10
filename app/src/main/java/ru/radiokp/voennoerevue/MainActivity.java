@@ -714,7 +714,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private static final String INSTALL_VK_HOOK_SCRIPT = "(function(){try{if(window.__radioKpHook)return;window.__radioKpHook=true;" +
             "function hideVideo(){try{document.querySelectorAll('video').forEach(function(v){v.style.setProperty('position','fixed','important');v.style.setProperty('left','-5px','important');v.style.setProperty('top','-5px','important');v.style.setProperty('width','1px','important');v.style.setProperty('height','1px','important');v.style.setProperty('opacity','0.001','important');v.style.setProperty('pointer-events','none','important');v.controls=false;v.muted=true;try{v.pause();v.removeAttribute('autoplay')}catch(e){}})}catch(e){}}" +
             "hideVideo();try{new MutationObserver(hideVideo).observe(document.documentElement,{childList:true,subtree:true})}catch(e){}" +
-            "function report(t){try{if(typeof t==='string'&&(/playerParams|hls_live|postlive_mp4|live_mp4|\\"hls[0-9_]*\\"/i).test(t)&&window.AudioBridge)window.AudioBridge.onPossibleStreamText(t)}catch(e){}}" +
+            "function report(t){try{if(typeof t==='string'&&(t.indexOf('playerParams')!==-1||t.indexOf('hls')!==-1||t.indexOf('live_mp4')!==-1||t.indexOf('postlive_mp4')!==-1)&&window.AudioBridge)window.AudioBridge.onPossibleStreamText(t)}catch(e){}}" +
             "var f=window.fetch;if(f)window.fetch=function(){return f.apply(this,arguments).then(function(r){try{r.clone().text().then(report)}catch(e){}return r})};" +
             "var op=XMLHttpRequest.prototype.open,se=XMLHttpRequest.prototype.send;" +
             "XMLHttpRequest.prototype.open=function(m,u){this.__radioKpUrl=String(u||'');return op.apply(this,arguments)};" +
