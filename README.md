@@ -165,3 +165,13 @@ HDS/F4M-диагностика отложена до отдельной реал
 - Навигация к видео определяется как по URL-пути, так и по query-параметру VK `z=video-...`; это устраняет ложный отказ для маршрутов VK с идентификатором видео в query.
 - RuTube-путь, выбор минимального HLS-варианта и Media3 playback pipeline не менялись.
 - `versionCode=26`, `versionName=0.7.19`.
+
+
+## VK al_video playerParams extractor (0.7.20)
+
+- VK LIVE discovery no longer chooses cards using text badges. It enumerates video IDs from the channel LIVE page and checks each candidate through VK's own `al_video.php` POST endpoint with `act=show`, preserving the WebView session cookies.
+- The extractor parses both the `payload[].player.params[0]` structure and the embedded `var playerParams = {...}` object.
+- It accepts only VK's confirmed `live=2` state and extracts all HLS format fields whose names start with `hls`, excluding `hls_live_playback`. Finished `live=3` recordings are rejected.
+- An on-screen VK diagnostic reports candidate count, API HTTP status, player live state and extracted HLS count, so an unsuccessful attempt is traceable instead of silently guessed.
+- RuTube resolver, its lowest-bitrate HLS selection, and the Media3 playback pipeline are unchanged.
+- `versionCode=27`, `versionName=0.7.20`.
