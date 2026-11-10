@@ -716,6 +716,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             "hideVideo();try{new MutationObserver(hideVideo).observe(document.documentElement,{childList:true,subtree:true})}catch(e){}" +
             "function report(t){try{if(typeof t==='string'&&(t.indexOf('playerParams')!==-1||t.indexOf('hls')!==-1||t.indexOf('live_mp4')!==-1||t.indexOf('postlive_mp4')!==-1)&&window.AudioBridge)window.AudioBridge.onPossibleStreamText(t)}catch(e){}}" +
             "var f=window.fetch;if(f)window.fetch=function(){return f.apply(this,arguments).then(function(r){try{r.clone().text().then(report)}catch(e){}return r})};" +
+            "try{if(window.cur&&window.cur.apiPrefetchCache)report(JSON.stringify({apiPrefetchCache:window.cur.apiPrefetchCache}))}catch(e){}" +
             "var op=XMLHttpRequest.prototype.open,se=XMLHttpRequest.prototype.send;" +
             "XMLHttpRequest.prototype.open=function(m,u){this.__radioKpUrl=String(u||'');return op.apply(this,arguments)};" +
             "XMLHttpRequest.prototype.send=function(){this.addEventListener('load',function(){try{report(this.responseText)}catch(e){}});return se.apply(this,arguments)};" +
@@ -844,6 +845,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         Object parsed = parseJsonBody(body);
         if (parsed != null) collectVkPlayerFormats(parsed, urls, false, 0);
         collectVkEmbeddedPlayerParams(body, urls);
+        collectVkApiPrefetchHls(body, urls);
         return new ArrayList<>(urls);
     }
 
@@ -903,6 +905,90 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 collectVkPlayerFormats(new JSONObject(json), urls, false, 0);
             } catch (Exception ignored) { }
         }
+    }
+
+    /**
+     * Modern VK Video pages preload video.get responses in window.cur.apiPrefetchCache.
+     * A live broadcast exposes files.hls; saved videos expose files.hls_ondemand.
+     * Only the live-only key is accepted from this cache.
+     */
+    private static void collectVkApiPrefetchHls(String body, LinkedHashSet<String> urls) {
+        if (body == null || body.isEmpty() || urls.size() >= MAX_HLS_CANDIDATES) return;
+        Matcher matcher = Pattern.compile("[\\\"']apiPrefetchCache[\\\"']\\s*:\\s*").matcher(body);
+        while (matcher.find() && urls.size() < MAX_HLS_CANDIDATES) {
+            int open = body.indexOf('[', matcher.end());
+            if (open < 0) continue;
+            String json = extractBalancedJsonArray(body, open);
+            if (json == null) continue;
+            try {
+                collectVkPrefetchEntries(new JSONArray(json), urls, 0);
+            } catch (Exception ignored) { }
+        }
+    }
+
+    private static void collectVkPrefetchEntries(Object node, LinkedHashSet<String> urls, int depth) {
+        if (node == null || depth > 16 || urls.size() >= MAX_HLS_CANDIDATES) return;
+        if (node instanceof JSONObject) {
+            JSONObject object = (JSONObject) node;
+            String method = object.optString("method", "");
+            if ("video.get".equalsIgnoreCase(method)) {
+                collectVkVideoGetFiles(object.opt("response"), urls, depth + 1);
+            }
+            JSONArray names = object.names();
+            if (names != null) {
+                for (int i = 0; i < names.length() && urls.size() < MAX_HLS_CANDIDATES; i++) {
+                    collectVkPrefetchEntries(object.opt(names.optString(i)), urls, depth + 1);
+                }
+            }
+        } else if (node instanceof JSONArray) {
+            JSONArray array = (JSONArray) node;
+            for (int i = 0; i < array.length() && urls.size() < MAX_HLS_CANDIDATES; i++) {
+                collectVkPrefetchEntries(array.opt(i), urls, depth + 1);
+            }
+        }
+    }
+
+    private static void collectVkVideoGetFiles(Object node, LinkedHashSet<String> urls, int depth) {
+        if (node == null || depth > 18 || urls.size() >= MAX_HLS_CANDIDATES) return;
+        if (node instanceof JSONObject) {
+            JSONObject object = (JSONObject) node;
+            JSONObject files = object.optJSONObject("files");
+            if (files != null && !files.has("hls_ondemand")) {
+                Object hls = files.opt("hls");
+                if (hls instanceof String) addHlsCandidate((String) hls, SOURCE_VK, urls);
+            }
+            JSONArray names = object.names();
+            if (names != null) {
+                for (int i = 0; i < names.length() && urls.size() < MAX_HLS_CANDIDATES; i++) {
+                    collectVkVideoGetFiles(object.opt(names.optString(i)), urls, depth + 1);
+                }
+            }
+        } else if (node instanceof JSONArray) {
+            JSONArray array = (JSONArray) node;
+            for (int i = 0; i < array.length() && urls.size() < MAX_HLS_CANDIDATES; i++) {
+                collectVkVideoGetFiles(array.opt(i), urls, depth + 1);
+            }
+        }
+    }
+
+    private static String extractBalancedJsonArray(String text, int start) {
+        if (text == null || start < 0 || start >= text.length() || text.charAt(start) != '[') return null;
+        int depth = 0;
+        boolean inString = false;
+        boolean escaped = false;
+        for (int i = start; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (inString) {
+                if (escaped) escaped = false;
+                else if (c == '\\') escaped = true;
+                else if (c == '"') inString = false;
+                continue;
+            }
+            if (c == '"') inString = true;
+            else if (c == '[') depth++;
+            else if (c == ']' && --depth == 0) return text.substring(start, i + 1);
+        }
+        return null;
     }
 
     private static String extractBalancedJsonObject(String text, int start) {
