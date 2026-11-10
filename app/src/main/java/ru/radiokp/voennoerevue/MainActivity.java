@@ -566,6 +566,12 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
             @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
                 currentPageUrl = url;
+                if (source == SOURCE_VK && isSelectedVkVideoPage(url)) {
+                    // Navigation to a video page was initiated from the selected LIVE card or by the user.
+                    vkLiveCardSelected = true;
+                } else if (source == SOURCE_VK && url.contains("/@radiokp/lives")) {
+                    vkLiveCardSelected = false;
+                }
                 if (source == SOURCE_VK && (url.contains("login.vk.ru") || url.contains("login.vk.com"))) {
                     statusView.setText("VK просит авторизоваться. Войдите во встроенной странице и вернитесь к эфирам.");
                 } else if (source == SOURCE_RUTUBE && url.contains("/feeds/stream")) {
@@ -699,15 +705,14 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             "if(window.__radioKpLiveScan)return;window.__radioKpLiveScan=true;" +
             "function norm(s){return String(s||'').replace(/\\s+/g,' ').trim().toLowerCase();}" +
             "function liveBadge(el){var t=norm(el.innerText||el.textContent||el.getAttribute('aria-label')||el.getAttribute('title'));" +
-            "return /^(live|в эфире|сейчас в эфире|эфир идет|эфир идёт|live now)$/.test(t);}" +
+            "return /^(?:live|в эфире|сейчас в эфире|прямой эфир|эфир ид[её]т)(?:\\s+(?:\\d{1,2}:\\d{2}|сейчас|now))?$/.test(t);}" +
+            "function videoLink(h){return /(?:^|[/?#&=])(?:video|live)-\\-?\\d+_\\d+(?:[/?&#]|$)/i.test(String(h||''));}" +
             "function scan(){try{" +
-            "var nodes=[].slice.call(document.querySelectorAll('[class*=live],[data-testid*=live],[aria-label],[title]'));" +
+            "var nodes=[].slice.call(document.querySelectorAll('[class*=live],[data-testid*=live],[aria-label],[title],span,div'));" +
             "for(var i=0;i<nodes.length;i++){if(!liveBadge(nodes[i]))continue;var p=nodes[i];" +
-            "for(var d=0;p&&d<10;d++,p=p.parentElement){" +
-            "var t=norm(p.innerText||p.textContent);" +
-            "var a=p.matches&&p.matches('a[href*=\\\"/video-\\\"],a[href*=\\\"/live-\\\"]')?p:p.querySelector&&p.querySelector('a[href*=\\\"/video-\\\"],a[href*=\\\"/live-\\\"]');" +
-            "if(a&&t.length<1800&&/\\/(video-|live-)/.test(a.href)&&/радио\\s+комсомольская\\s+правда|радио\\s+«комсомольская\\s+правда»/.test(t)){" +
-            "if(window.AudioBridge)window.AudioBridge.onSelectedVkVideoUrl(a.href);a.click();return true;}}}" +
+            "for(var d=0;p&&d<12;d++,p=p.parentElement){" +
+            "var a=p.matches&&p.matches('a[href]')?p:p.querySelector&&p.querySelector('a[href]');" +
+            "if(a&&videoLink(a.href)){if(window.AudioBridge)window.AudioBridge.onSelectedVkVideoUrl(a.href);a.click();return true;}}}" +
             "}catch(e){}return false;}" +
             "var tries=0;function tick(){if(scan())return;if(++tries<28)setTimeout(tick,1000);else if(window.AudioBridge)window.AudioBridge.onLiveScanFailed();}" +
             "setTimeout(tick,1300);" +
@@ -814,10 +819,13 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         String status = object.optString("live_status", "").toLowerCase(Locale.ROOT);
         if ("post_live".equals(status) || "ended".equals(status) || "finished".equals(status)
                 || "recording".equals(status) || "offline".equals(status)) return true;
-        if (!object.has("hls_live")) return false;
         Object live = object.opt("live");
-        if (Boolean.FALSE.equals(live) || "false".equalsIgnoreCase(String.valueOf(live))
-                || "0".equals(String.valueOf(live))) return true;
+        String liveText = String.valueOf(live);
+        // VK's live=3 marks a post-live recording, not an active broadcast.
+        if ((live instanceof Number && ((Number) live).intValue() == 3) || "3".equals(liveText)) return true;
+        if (!object.has("hls_live")) return false;
+        if (Boolean.FALSE.equals(live) || "false".equalsIgnoreCase(liveText)
+                || "0".equals(liveText)) return true;
         Object isLive = object.opt("is_live");
         if (Boolean.FALSE.equals(isLive) || "false".equalsIgnoreCase(String.valueOf(isLive))
                 || "0".equals(String.valueOf(isLive))) return true;
@@ -1179,8 +1187,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         if (url == null) return false;
         try {
             Uri uri = Uri.parse(url);
+            String full = uri.toString();
+            if (Pattern.compile("(?:^|[/?#&=])(?:video|live)-\\-?\\d+_\\d+(?:[/?&#]|$)", Pattern.CASE_INSENSITIVE).matcher(full).find()) return true;
             String path = uri.getPath() == null ? "" : uri.getPath();
-            if (Pattern.compile("^/(?:video|live)-\\-?\\d+_\\d+(?:/|$)", Pattern.CASE_INSENSITIVE).matcher(path).find()) return true;
             if (path.endsWith("/video_ext.php")) {
                 return uri.getQueryParameter("oid") != null && uri.getQueryParameter("id") != null;
             }
