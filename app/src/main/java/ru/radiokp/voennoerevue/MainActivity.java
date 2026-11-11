@@ -180,8 +180,6 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             liveScaleFromMetadata = false;
         }
         buildUi();
-        android.webkit.WebViewRenderProcess unusedRenderProcess = null;
-        android.webkit.WebViewFactoryProviderInfo unusedProviderInfo = null;
         debugLog("APP", "onCreate · autoStart=" + autoStart + " · autoFailover=" + autoFailover
                 + " · Android=" + Build.VERSION.RELEASE + " API=" + Build.VERSION.SDK_INT
                 + " · WebViewPkg=" + (WebView.getCurrentWebViewPackage() == null ? "unknown" : WebView.getCurrentWebViewPackage().packageName)
