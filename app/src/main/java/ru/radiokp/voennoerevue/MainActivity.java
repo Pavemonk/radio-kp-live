@@ -4,6 +4,8 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -25,8 +27,11 @@ import android.os.Looper;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.webkit.ConsoleMessage;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
@@ -85,6 +90,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private TextView statusView;
     private TextView sourceView;
     private TextView elapsedView;
+    private final StringBuilder vkDebugLog = new StringBuilder(32768);
+    private TextView vkDebugText;
+    private ScrollView vkDebugScroll;
+    private static final int MAX_VK_DEBUG_CHARS = 90000;
     private TextView diagnosticView;
     private String rutubeApiDiagnostic = "Ожидание ответа LIVE API…";
     private String rutubeHlsDiagnostic = "Ожидание проверки HLS-плейлиста…";
@@ -258,6 +267,28 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         LinearLayout.LayoutParams diagnosticLp = new LinearLayout.LayoutParams(-1, -2);
         diagnosticLp.bottomMargin = dp(10);
         root.addView(diagnosticView, diagnosticLp);
+
+        TextView debugHeading = text("ЖУРНАЛ ОТЛАДКИ VK", 12, Color.rgb(255, 125, 80), true);
+        LinearLayout.LayoutParams debugHeadingLp = new LinearLayout.LayoutParams(-1, -2);
+        debugHeadingLp.topMargin = dp(10);
+        debugHeadingLp.bottomMargin = dp(6);
+        root.addView(debugHeading, debugHeadingLp);
+
+        Button copyDebugButton = smallButton("КОПИРОВАТЬ DEBUG-ЛОГ", false);
+        copyDebugButton.setOnClickListener(v -> copyVkDebugLog());
+        root.addView(copyDebugButton, new LinearLayout.LayoutParams(-1, dp(44)));
+
+        vkDebugScroll = new ScrollView(this);
+        vkDebugScroll.setFillViewport(false);
+        vkDebugScroll.setBackground(roundRect(Color.rgb(20, 23, 29), dp(8), Color.rgb(48, 55, 66), dp(1)));
+        vkDebugText = text("Журнал пока пуст.", 10, Color.rgb(190, 199, 211), false);
+        vkDebugText.setTypeface(Typeface.MONOSPACE);
+        vkDebugText.setPadding(dp(9), dp(8), dp(9), dp(8));
+        vkDebugScroll.addView(vkDebugText, new ScrollView.LayoutParams(-1, -2));
+        LinearLayout.LayoutParams debugScrollLp = new LinearLayout.LayoutParams(-1, dp(230));
+        debugScrollLp.topMargin = dp(7);
+        debugScrollLp.bottomMargin = dp(12);
+        root.addView(vkDebugScroll, debugScrollLp);
 
         LinearLayout transport = new LinearLayout(this);
         transport.setGravity(Gravity.CENTER_VERTICAL);
@@ -1873,6 +1904,97 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         diagnosticView.setVisibility(View.VISIBLE);
         diagnosticView.setText("ДИАГНОСТИКА · " + rutubeApiDiagnostic
                 + "\n" + rutubeHlsDiagnostic);
+    }
+
+    private void debugLog(String stage, String details) {
+        String message = details == null ? "" : details.replace('\n', ' ').replace('\r', ' ');
+        String stamp = new java.text.SimpleDateFormat("HH:mm:ss.SSS", Locale.ROOT)
+                .format(new java.util.Date());
+        String line = stamp + " | " + stage + " | " + message + "\n";
+        final String snapshot;
+        synchronized (vkDebugLog) {
+            vkDebugLog.append(line);
+            if (vkDebugLog.length() > MAX_VK_DEBUG_CHARS) {
+                int trimTo = vkDebugLog.length() - MAX_VK_DEBUG_CHARS;
+                int newline = vkDebugLog.indexOf("\n", trimTo);
+                vkDebugLog.delete(0, newline >= 0 ? newline + 1 : trimTo);
+            }
+            snapshot = vkDebugLog.toString();
+        }
+        runOnUiThread(() -> {
+            if (vkDebugText != null) vkDebugText.setText(snapshot);
+        });
+    }
+
+    private void copyVkDebugLog() {
+        String contents;
+        synchronized (vkDebugLog) { contents = vkDebugLog.toString(); }
+        if (contents.isEmpty()) {
+            Toast.makeText(this, "Журнал пока пуст", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Radio KP VK debug log", contents));
+        Toast.makeText(this, "DEBUG-лог скопирован. Вставь его сюда целиком.", Toast.LENGTH_LONG).show();
+    }
+
+    private static String debugSafeUrl(String raw) {
+        if (raw == null || raw.isEmpty()) return "(пустой URL)";
+        try {
+            Uri uri = Uri.parse(raw);
+            String host = uri.getHost() == null ? "?" : uri.getHost();
+            String path = uri.getPath() == null ? "/" : uri.getPath();
+            return uri.getScheme() + "://" + host + path + (uri.getEncodedQuery() == null ? "" : " [query скрыт]");
+        } catch (Exception ignored) {
+            return "(URL не разобран)";
+        }
+    }
+
+    private static String debugCandidateHosts(ArrayList<String> urls) {
+        if (urls == null || urls.isEmpty()) return "нет";
+        ArrayList<String> safe = new ArrayList<>();
+        for (String url : urls) {
+            if (safe.size() >= 8) break;
+            safe.add(debugSafeUrl(url));
+        }
+        return safe.toString();
+    }
+
+    private static String debugJsonShape(String body) {
+        if (body == null || body.isEmpty()) return "empty";
+        Object parsed = parseJsonBody(body);
+        if (parsed instanceof JSONObject) {
+            JSONObject object = (JSONObject) parsed;
+            JSONArray names = object.names();
+            ArrayList<String> keys = new ArrayList<>();
+            if (names != null) for (int i = 0; i < names.length() && i < 24; i++) keys.add(names.optString(i));
+            String shape = "object keys=" + keys;
+            JSONArray payload = object.optJSONArray("payload");
+            if (payload != null) {
+                shape += " payload.len=" + payload.length();
+                Object second = payload.opt(1);
+                if (second instanceof JSONArray) {
+                    JSONArray inner = (JSONArray) second;
+                    shape += " payload[1].len=" + inner.length();
+                    JSONObject last = inner.optJSONObject(inner.length() - 1);
+                    if (last != null) {
+                        JSONObject player = last.optJSONObject("player");
+                        shape += " final.keys=" + limitedJsonKeys(last, 18);
+                        if (player != null) shape += " player.keys=" + limitedJsonKeys(player, 18);
+                    }
+                }
+            }
+            return shape;
+        }
+        if (parsed instanceof JSONArray) return "array len=" + ((JSONArray) parsed).length();
+        return "not-json prefix=" + body.substring(0, Math.min(80, body.length())).replaceAll("\\s+", " ");
+    }
+
+    private static String limitedJsonKeys(JSONObject object, int limit) {
+        JSONArray names = object == null ? null : object.names();
+        ArrayList<String> keys = new ArrayList<>();
+        if (names != null) for (int i = 0; i < names.length() && i < limit; i++) keys.add(names.optString(i));
+        return keys.toString();
     }
 
     private void setVkDiagnostic(String value) {
