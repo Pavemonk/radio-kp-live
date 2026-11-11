@@ -762,7 +762,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             "var html=document.documentElement?document.documentElement.innerHTML:'';" +
             "var re=/(?:video|live)(-?[0-9]+)_([0-9]+)/ig,m;while((m=re.exec(html))&&ids.length<" + MAX_VK_PROBE_IDS + ")add(m[0]);" +
             "}catch(e){}return ids;}" +
-            "async function probe(){var ids=[];for(var pass=0;pass<8;pass++){ids=collect();if(ids.length)break;await new Promise(function(r){setTimeout(r,500)});}" +
+            "async function probe(){var ids=[],seen={};for(var pass=0;pass<12;pass++){var found=collect();found.forEach(function(id){if(!seen[id]&&ids.length<" + MAX_VK_PROBE_IDS + "){seen[id]=1;ids.push(id);}});if(ids.length>=" + MAX_VK_PROBE_IDS + ")break;await new Promise(function(r){setTimeout(r,600)});}" +
             "if(window.AudioBridge)window.AudioBridge.onVkProbeCandidateCount(ids.length);" +
             "if(!ids.length){if(window.AudioBridge)window.AudioBridge.onVkProbeFinished('В LIVE-разделе не найдено ссылок на видеокарточки');return;}" +
             "if(window.AudioBridge)window.AudioBridge.onVkProbeCandidates(JSON.stringify(ids));}" +
