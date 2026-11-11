@@ -180,10 +180,13 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             liveScaleFromMetadata = false;
         }
         buildUi();
+        android.webkit.WebView.getCurrentWebViewPackage();
+        android.webkit.WebView.getCurrentWebViewPackage();
         debugLog("APP", "onCreate · autoStart=" + autoStart + " · autoFailover=" + autoFailover
+                + " · device=" + Build.MANUFACTURER + " " + Build.MODEL
                 + " · Android=" + Build.VERSION.RELEASE + " API=" + Build.VERSION.SDK_INT
-                + " · WebViewPkg=" + (WebView.getCurrentWebViewPackage() == null ? "unknown" : WebView.getCurrentWebViewPackage().packageName)
-                + " · WebViewVer=" + (WebView.getCurrentWebViewPackage() == null ? "unknown" : WebView.getCurrentWebViewPackage().versionName));
+                + " · WebView=" + (WebView.getCurrentWebViewPackage() == null ? "unknown" : WebView.getCurrentWebViewPackage().packageName)
+                + "/" + (WebView.getCurrentWebViewPackage() == null ? "unknown" : WebView.getCurrentWebViewPackage().versionName));
         requestNotificationPermissionIfNeeded();
         if (autoStart) {
             statusView.setText("Запускаю основной источник — VK Видео…");
@@ -927,7 +930,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             long liveStart = streams.isEmpty() ? 0L : extractLiveStartTimeMs(body, SOURCE_VK);
             return new VkProbeResult(videoId, summary, streams, liveStart);
         } catch (Exception error) {
-            return new VkProbeResult(videoId, error.getClass().getSimpleName(), new ArrayList<>(), 0L);
+            return new VkProbeResult(videoId, error.getClass().getSimpleName()
+                    + " · " + safeShort(error.getMessage(), 160), new ArrayList<>(), 0L);
         } finally {
             if (connection != null) connection.disconnect();
         }
@@ -1987,7 +1991,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             snapshot = vkDebugLog.toString();
         }
         runOnUiThread(() -> {
-            if (vkDebugText != null) vkDebugText.setText(snapshot);
+            if (vkDebugText != null) {
+                vkDebugText.setText(snapshot);
+                if (vkDebugScroll != null) vkDebugScroll.post(() -> vkDebugScroll.fullScroll(View.FOCUS_DOWN));
+            }
         });
     }
 
@@ -2061,7 +2068,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             return shape;
         }
         if (parsed instanceof JSONArray) return "array len=" + ((JSONArray) parsed).length();
-        return "not-json prefix=" + body.substring(0, Math.min(80, body.length())).replaceAll("\\s+", " ");
+        return "not-json · chars=" + body.length();
     }
 
     private static String limitedJsonKeys(JSONObject object, int limit) {
