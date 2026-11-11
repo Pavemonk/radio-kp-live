@@ -599,6 +599,7 @@ public final class AudioPlaybackService extends Service {
                     : (currentReferer.startsWith("https://radiokp.ru") ? "https://radiokp.ru" : "https://vkvideo.ru"));
             connection.setRequestProperty("Accept", "application/vnd.apple.mpegurl,application/x-mpegURL,*/*");
             connection.setRequestProperty("Accept-Encoding", "identity");
+            if (currentCookie != null && !currentCookie.isEmpty()) connection.setRequestProperty("Cookie", currentCookie);
 
             int responseCode = connection.getResponseCode();
             if (responseCode < 200 || responseCode >= 300) {
