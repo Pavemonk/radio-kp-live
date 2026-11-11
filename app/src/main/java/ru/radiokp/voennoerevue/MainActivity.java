@@ -942,7 +942,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         if (alVideoData != null) {
             // al_video.php is the authoritative response: the actual player
             // params are opts.player.params[0], not arbitrary nested live fields.
-            if (getVkLiveState(alVideoData) != 1) return new ArrayList<>(urls);
+            if (!isVkAlVideoLive(alVideoData)) return new ArrayList<>(urls);
             JSONArray names = alVideoData.names();
             if (names != null) {
                 for (int i = 0; i < names.length() && urls.size() < MAX_HLS_CANDIDATES; i++) {
@@ -965,6 +965,13 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         collectVkEmbeddedPlayerParams(body, urls);
         collectVkApiPrefetchHls(body, urls);
         return new ArrayList<>(urls);
+    }
+
+    private static boolean isVkAlVideoLive(JSONObject data) {
+        if (data == null) return false;
+        Object live = data.opt("live");
+        return (live instanceof Number && ((Number) live).intValue() == 2)
+                || "2".equals(String.valueOf(live));
     }
 
     /**
