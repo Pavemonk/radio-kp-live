@@ -684,7 +684,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             }
             if (liveDurationMs > 0L) runOnUiThread(() -> acceptLiveDuration(liveDurationMs, source));
             ArrayList<String> resolved = selectedSourceMetadata
-                    ? (source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body))
+                    ? (source == SOURCE_VK
+                        ? (url.contains("video.getVideoDiscover") ? extractVkLiveDiscoverHlsUrls(body) : extractVkHlsUrls(body))
+                        : extractRutubeLiveHlsUrls(body))
                     : new ArrayList<>();
             ArrayList<String> dashResolved = source == SOURCE_RUTUBE && selectedSourceMetadata
                     ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
@@ -981,6 +983,41 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
     private static final int MAX_HLS_CANDIDATES = 8;
     private static final int MAX_DASH_CANDIDATES = 4;
+
+    /**
+     * The VK mobile player discovery method returns hls_live directly in its
+     * JSON response. hls_live_playback is a delayed edge and is intentionally skipped.
+     */
+    private static ArrayList<String> extractVkLiveDiscoverHlsUrls(String body) {
+        LinkedHashSet<String> urls = new LinkedHashSet<>();
+        if (body == null || body.isEmpty()) return new ArrayList<>(urls);
+        Object parsed = parseJsonBody(body);
+        collectVkLiveDiscoverFields(parsed, urls, 0);
+        return new ArrayList<>(urls);
+    }
+
+    private static void collectVkLiveDiscoverFields(Object node, LinkedHashSet<String> urls, int depth) {
+        if (node == null || depth > 16 || urls.size() >= MAX_HLS_CANDIDATES) return;
+        if (node instanceof JSONObject) {
+            JSONObject object = (JSONObject) node;
+            Object liveHls = object.opt("hls_live");
+            if (liveHls instanceof String) addHlsCandidate((String) liveHls, SOURCE_VK, urls);
+            JSONArray names = object.names();
+            if (names != null) {
+                for (int i = 0; i < names.length() && urls.size() < MAX_HLS_CANDIDATES; i++) {
+                    String name = names.optString(i);
+                    if (!"hls_live_playback".equalsIgnoreCase(name)) {
+                        collectVkLiveDiscoverFields(object.opt(name), urls, depth + 1);
+                    }
+                }
+            }
+        } else if (node instanceof JSONArray) {
+            JSONArray array = (JSONArray) node;
+            for (int i = 0; i < array.length() && urls.size() < MAX_HLS_CANDIDATES; i++) {
+                collectVkLiveDiscoverFields(array.opt(i), urls, depth + 1);
+            }
+        }
+    }
 
     private static ArrayList<String> extractVkHlsUrls(String body) {
         LinkedHashSet<String> urls = new LinkedHashSet<>();
