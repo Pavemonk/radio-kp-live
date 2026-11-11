@@ -7,11 +7,11 @@ android {
     compileSdk 35
 
     defaultConfig {
-        applicationId 'ru.radiokp.voennoerevue.vkfix'
+        applicationId 'ru.radiokp.voennoerevue.vkfix2'
         minSdk 23
         targetSdk 35
-        versionCode 28
-        versionName '0.7.21'
+        versionCode 29
+        versionName '0.7.22'
     }
 }
 
