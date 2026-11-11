@@ -913,9 +913,11 @@ public final class AudioPlaybackService extends Service {
             boolean allowedHost = host.endsWith(".okcdn.ru") || host.endsWith(".vkuservideo.net") || host.endsWith(".userapi.com")
                     || host.equals("vkvideo.ru") || host.endsWith(".vkvideo.ru") || host.equals("vk.com") || host.endsWith(".vk.com")
                     || host.endsWith(".vkuseraudio.net") || host.endsWith(".vkuseraudio.ru") || host.endsWith(".vkuseraudio.com")
-                    || host.endsWith(".vkuserlive.net") || host.endsWith(".vkuser.net") || host.endsWith(".vkuservideo.com")
-                    || host.endsWith(".vkuservideo.ru") || host.endsWith(".cdn-vk.ru") || host.endsWith(".cdn-vk.com")
-                    || host.endsWith(".mycdn.me")
+                    || host.endsWith(".vkuserlive.net") || host.endsWith(".vkuserlive.com") || host.endsWith(".vkuser.net")
+                    || host.endsWith(".vkusercdn.ru") || host.endsWith(".userapi.ru") || host.endsWith(".vkuservideo.com")
+                    || host.endsWith(".vkuservideo.ru") || host.endsWith(".cdn-vk.ru") || host.endsWith(".cdn-vk.net")
+                    || host.endsWith(".cdn-vk.com") || host.endsWith(".vk-cdn.me") || host.endsWith(".vk-cdn.net")
+                    || host.endsWith(".vkcache.com") || host.endsWith(".vkcdnservice.com") || host.endsWith(".mycdn.me")
                     || host.equals("rutube.ru") || host.endsWith(".rutube.ru")
                     || host.equals("rtbcdn.ru") || host.endsWith(".rtbcdn.ru") || host.equals("rtbcdn.net") || host.endsWith(".rtbcdn.net");
             if (!allowedHost) return false;
