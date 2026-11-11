@@ -180,9 +180,12 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             liveScaleFromMetadata = false;
         }
         buildUi();
+        android.webkit.WebViewRenderProcess unusedRenderProcess = null;
+        android.webkit.WebViewFactoryProviderInfo unusedProviderInfo = null;
         debugLog("APP", "onCreate · autoStart=" + autoStart + " · autoFailover=" + autoFailover
                 + " · Android=" + Build.VERSION.RELEASE + " API=" + Build.VERSION.SDK_INT
-                + " · WebView=" + WebView.getCurrentWebViewPackage());
+                + " · WebViewPkg=" + (WebView.getCurrentWebViewPackage() == null ? "unknown" : WebView.getCurrentWebViewPackage().packageName)
+                + " · WebViewVer=" + (WebView.getCurrentWebViewPackage() == null ? "unknown" : WebView.getCurrentWebViewPackage().versionName));
         requestNotificationPermissionIfNeeded();
         if (autoStart) {
             statusView.setText("Запускаю основной источник — VK Видео…");
@@ -505,6 +508,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     private void startPlayerService(String url, ArrayList<String> urls, ArrayList<String> dashUrls, String referer, String sourceName, int qualityKbps, boolean mp3, String cookie) {
+        debugLog("PLAYER_START", "source=" + sourceName + " · stream=" + debugSafeUrl(url)
+                + " · hls=" + debugCandidateHosts(urls) + " · dashCount=" + (dashUrls == null ? 0 : dashUrls.size())
+                + " · qualityLimit=" + qualityKbps + "kbps · referer=" + debugSafeUrl(referer));
         Intent intent = new Intent(this, AudioPlaybackService.class)
                 .setAction(AudioPlaybackService.ACTION_PLAY)
                 .putExtra(AudioPlaybackService.EXTRA_URL, url)
@@ -520,6 +526,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     private void tryNextSource(String reason) {
+        debugLog("FAILOVER", "reason=" + reason + " · from=" + SOURCE_NAMES[currentSource] + " · triedMask=" + attemptedSourcesMask);
         cancelSourceTimeout();
         if (!autoFailover) {
             statusView.setText("Источник недоступен. Можно выбрать другой вручную.");
@@ -698,8 +705,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 String host = request.getUrl().getHost();
                 if (!"GET".equalsIgnoreCase(method)) return super.shouldInterceptRequest(view, request);
                 if (source == SOURCE_VK && url.contains("video.getVideoDiscover") && isVkHost(host)) {
-                    debugLog("VK_DISCOVER", "intercept " + request.getMethod() + " · " + debugSafeUrl(url));
-                    return fetchAndInspect(url, request.getRequestHeaders(), source);
+                    debugLog("VK_DISCOVER", "seen method=" + method + " · " + debugSafeUrl(url));
+                    if ("GET".equalsIgnoreCase(method)) return fetchAndInspect(url, request.getRequestHeaders(), source);
+                    debugLog("VK_DISCOVER", "not intercepted: method is not GET");
                 }
                 if (source == SOURCE_RUTUBE && (url.contains("/api/play/options/") || url.contains("/api/video/")) && isRutubeHost(host)) {
                     return fetchAndInspect(url, request.getRequestHeaders(), source);
@@ -915,7 +923,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                     ? extractVkHlsUrls(body) : new ArrayList<>();
             String type = connection.getContentType();
             String summary = "HTTP " + code + " · " + (type == null ? "без Content-Type" : type)
-                    + " · " + findVkLiveStateSummary(body) + " · HLS " + streams.size();
+                    + " · " + findVkLiveStateSummary(body) + " · HLS " + streams.size()
+                    + " · cookie=" + (cookie == null || cookie.isEmpty() ? "нет" : "есть")
+                    + " · " + debugJsonShape(body);
             long liveStart = streams.isEmpty() ? 0L : extractLiveStartTimeMs(body, SOURCE_VK);
             return new VkProbeResult(videoId, summary, streams, liveStart);
         } catch (Exception error) {
@@ -953,6 +963,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                     VkProbeResult result = future.get();
                     checked++;
                     lastResult = result.videoId + " · " + result.summary;
+                    debugLog("VK_AL_VIDEO", "id=" + result.videoId + " · " + result.summary
+                            + " · hlsHosts=" + debugCandidateHosts(result.streams));
                     if (!result.streams.isEmpty()
                             && expectedAttemptId == attemptId && currentSource == SOURCE_VK && !streamStarted) {
                         vkSelectedVideoUrl = "https://vkvideo.ru/video" + result.videoId;
@@ -969,6 +981,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 pool.shutdownNow();
             }
             if (expectedAttemptId == attemptId && currentSource == SOURCE_VK && !streamStarted) {
+                debugLog("VK_PROBE_END", "checked=" + checked + "/" + videoIds.size()
+                        + " · last=" + lastResult + " · elapsedMs=" + (System.currentTimeMillis() - (deadline - 42000L)));
                 setVkDiagnostic("Проверено " + checked + " из " + videoIds.size()
                         + " видео · активный live=2 не найден · " + lastResult);
             }
@@ -997,6 +1011,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         }
         @JavascriptInterface public void onVkProbeCandidateCount(int count) {
             if (source != SOURCE_VK || source != currentSource || streamStarted) return;
+            debugLog("VK_SCAN", "DOM scanner candidate count=" + count);
             setVkDiagnostic("LIVE-лента открыта · найдено видеокарточек: " + count + " · проверяю их через VK API");
         }
         @JavascriptInterface public void onVkProbeCandidates(String json) {
@@ -1014,6 +1029,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 return;
             }
             vkProbeRunning = true;
+            debugLog("VK_SCAN", "candidate IDs (" + ids.size() + ")=" + ids);
             setVkDiagnostic("Найдено видео: " + ids.size() + " · проверяю параллельно до " + VK_PROBE_PARALLELISM);
             probeVkVideosNative(ids, attemptId);
         }
@@ -1038,6 +1054,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         }
         @JavascriptInterface public void onVkProbeFinished(String message) {
             if (source != SOURCE_VK || source != currentSource || streamStarted) return;
+            debugLog("VK_SCAN_END", safeShort(message, 300));
             setVkDiagnostic("VK: " + message);
         }
         @JavascriptInterface public void onPossibleStreamText(String body) {
@@ -1045,6 +1062,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             if (source == SOURCE_VK && !isVkLiveFeedPage(currentPageUrl)
                     && (!vkLiveCardSelected || !isSelectedVkVideoPage(currentPageUrl))) return;
             ArrayList<String> streams = source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body);
+            if (source == SOURCE_VK) debugLog("VK_PLAYER_TEXT", "bodyBytes=" + body.length()
+                    + " · json=" + debugJsonShape(body) + " · HLS=" + streams.size()
+                    + " · hosts=" + debugCandidateHosts(streams));
             ArrayList<String> dashStreams = source == SOURCE_RUTUBE ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
             long liveStartMs = (!streams.isEmpty() || !dashStreams.isEmpty())
                     ? extractLiveStartTimeMs(body, source) : 0L;
@@ -1788,6 +1808,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         ArrayList<String> safeHls = hlsUrls == null ? new ArrayList<>() : hlsUrls;
         ArrayList<String> safeDash = dashUrls == null ? new ArrayList<>() : dashUrls;
         String primaryUrl = !safeHls.isEmpty() ? safeHls.get(0) : safeDash.get(0);
+        debugLog("STREAM_FOUND", "source=" + SOURCE_NAMES[source] + " · hls=" + safeHls.size()
+                + " · hosts=" + debugCandidateHosts(safeHls) + " · dash=" + safeDash.size()
+                + " · liveStart=" + discoveredStartTimeMs);
         streamStarted = true;
         cancelSourceTimeout();
         runOnUiThread(() -> {
@@ -1936,6 +1959,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     @Override public void onHlsDiagnostics(String diagnostic) {
+        debugLog("HLS_INSPECT", diagnostic);
         runOnUiThread(() -> {
             rutubeHlsDiagnostic = diagnostic;
             renderRutubeDiagnostics();
@@ -1950,7 +1974,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     private void debugLog(String stage, String details) {
-        String message = details == null ? "" : details.replace('\n', ' ').replace('\r', ' ');
+        String message = safeShort(details == null ? "" : details.replace('\n', ' ').replace('\r', ' '), 1800);
         String stamp = new java.text.SimpleDateFormat("HH:mm:ss.SSS", Locale.ROOT)
                 .format(new java.util.Date());
         String line = stamp + " | " + stage + " | " + message + "\n";
@@ -1979,6 +2003,15 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
         if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Radio KP VK debug log", contents));
         Toast.makeText(this, "DEBUG-лог скопирован. Вставь его сюда целиком.", Toast.LENGTH_LONG).show();
+    }
+
+    private static String safeShort(String value, int maxChars) {
+        if (value == null) return "";
+        String safe = value.replaceAll("(?i)(https?://[^\\s?\\\"']+)\\?[^\\s\\\"']*", "$1?[query hidden]");
+        safe = safe.replaceAll("(?i)(access_token|refresh_token|token|sig|signature|auth|authorization|cookie|vk_access_token)=[^&\\s]+", "$1=[hidden]");
+        safe = safe.replaceAll("[\\r\\n\\t]+", " ").trim();
+        if (safe.length() > maxChars) safe = safe.substring(0, maxChars) + "…";
+        return safe;
     }
 
     private static String debugSafeUrl(String raw) {
@@ -2041,6 +2074,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     private void setVkDiagnostic(String value) {
+        debugLog("VK_STATUS", value);
         vkApiDiagnostic = value == null ? "VK: диагностика недоступна" : value;
         runOnUiThread(this::renderVkDiagnostics);
     }
@@ -2068,6 +2102,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     @Override public void onPlaybackStateChanged(boolean playing, String message) {
+        debugLog("PLAYER_STATE", "playing=" + playing + " · " + message);
         runOnUiThread(() -> {
             if (message != null && message.startsWith("SOURCE_ERROR:")) {
                 isPlaying = false;
