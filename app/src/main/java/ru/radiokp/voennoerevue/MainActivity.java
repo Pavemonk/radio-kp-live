@@ -667,6 +667,14 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             @Override public void onPageFinished(WebView view, String url) {
                 currentPageUrl = url;
                 debugLog("WEB", "page finished · " + debugSafeUrl(url) + " · title=" + safeShort(view.getTitle(), 100));
+                if (source == SOURCE_VK) {
+                    String feedCookie = CookieManager.getInstance().getCookie(VK_LIVES_URL);
+                    String apiCookie = CookieManager.getInstance().getCookie(VK_API_ENDPOINT);
+                    debugLog("VK_AUTH", "feedCookie=" + (feedCookie == null || feedCookie.isEmpty() ? "absent" : "present")
+                            + " (" + (feedCookie == null ? 0 : feedCookie.length()) + " chars)"
+                            + " · apiCookie=" + (apiCookie == null || apiCookie.isEmpty() ? "absent" : "present")
+                            + " (" + (apiCookie == null ? 0 : apiCookie.length()) + " chars)");
+                }
                 if (source == SOURCE_VK && isVkPage(url)) {
                     debugLog("VK", "installing player hook on " + debugSafeUrl(url));
                     view.evaluateJavascript(INSTALL_VK_HOOK_SCRIPT, null);
@@ -745,8 +753,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             String body = new String(bytes, StandardCharsets.UTF_8);
             if (source == SOURCE_VK) {
                 debugLog("VK_HTTP", "HTTP " + code + " · type=" + connection.getContentType()
-                        + " · bytes=" + bytes.length + " · url=" + debugSafeUrl(url)
-                        + " · json=" + debugJsonShape(body));
+                        + " · bytes=" + bytes.length + " · cookie=" + (cookie == null || cookie.isEmpty() ? "absent" : "present")
+                        + " · url=" + debugSafeUrl(url) + " · json=" + debugJsonShape(body));
             }
             boolean selectedVkVideo = source != SOURCE_VK
                     || isVkLiveFeedPage(currentPageUrl)
