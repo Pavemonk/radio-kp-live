@@ -811,6 +811,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                     connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
                     connection.setRequestProperty("Accept", "*/*");
                     String cookie = CookieManager.getInstance().getCookie(VK_API_ENDPOINT);
+                    if (cookie == null || cookie.isEmpty()) cookie = CookieManager.getInstance().getCookie(VK_LIVES_URL);
                     if (cookie != null && !cookie.isEmpty()) connection.setRequestProperty("Cookie", cookie);
                     String form = "act=show&video=" + URLEncoder.encode(videoId, "UTF-8") + "&al=1";
                     byte[] formBytes = form.getBytes(StandardCharsets.UTF_8);
@@ -940,10 +941,46 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         LinkedHashSet<String> urls = new LinkedHashSet<>();
         if (body == null || body.isEmpty()) return new ArrayList<>(urls);
         Object parsed = parseJsonBody(body);
+        JSONObject alVideoData = findVkAlVideoPlayerData(parsed);
+        if (alVideoData != null) {
+            // al_video.php is the authoritative response: the actual player
+            // params are opts.player.params[0], not arbitrary nested live fields.
+            if (getVkLiveState(alVideoData) != 1) return new ArrayList<>(urls);
+            JSONArray names = alVideoData.names();
+            if (names != null) {
+                for (int i = 0; i < names.length() && urls.size() < MAX_HLS_CANDIDATES; i++) {
+                    String name = names.optString(i);
+                    String lower = name.toLowerCase(Locale.ROOT);
+                    Object value = alVideoData.opt(name);
+                    if (lower.startsWith("hls") && !"hls_live_playback".equals(lower) && value instanceof String) {
+                        addHlsCandidate((String) value, SOURCE_VK, urls);
+                    }
+                }
+            }
+            return new ArrayList<>(urls);
+        }
         if (parsed != null) collectVkPlayerFormats(parsed, urls, false, 0);
         collectVkEmbeddedPlayerParams(body, urls);
         collectVkApiPrefetchHls(body, urls);
         return new ArrayList<>(urls);
+    }
+
+    /**
+     * Mirrors VK's canonical al_video extractor path:
+     * response.payload[-1].player.params[0].
+     */
+    private static JSONObject findVkAlVideoPlayerData(Object parsed) {
+        if (!(parsed instanceof JSONObject)) return null;
+        JSONObject root = (JSONObject) parsed;
+        JSONArray payload = root.optJSONArray("payload");
+        if (payload == null || payload.length() == 0) return null;
+        JSONObject options = payload.optJSONObject(payload.length() - 1);
+        if (options == null) return null;
+        JSONObject player = options.optJSONObject("player");
+        if (player == null) return null;
+        JSONArray params = player.optJSONArray("params");
+        if (params == null || params.length() == 0) return null;
+        return params.optJSONObject(0);
     }
 
     /**
@@ -1144,6 +1181,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
     private static String findVkLiveStateSummary(String body) {
         if (body == null) return "ответ пуст";
+        Object parsed = parseJsonBody(body);
+        JSONObject data = findVkAlVideoPlayerData(parsed);
+        if (data != null && data.has("live")) return "player.live=" + data.opt("live");
+        if (data != null && data.has("live_status")) return "live_status=" + data.opt("live_status");
         Matcher live = Pattern.compile("[\\\"']live[\\\"']\\s*:\\s*(-?\\d+|true|false)", Pattern.CASE_INSENSITIVE).matcher(body);
         if (live.find()) return "player.live=" + live.group(1);
         Matcher status = Pattern.compile("[\\\"']live_status[\\\"']\\s*:\\s*[\\\"']([^\\\"']+)", Pattern.CASE_INSENSITIVE).matcher(body);
