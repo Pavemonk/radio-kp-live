@@ -48,10 +48,12 @@ import org.json.JSONObject;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Locale;
@@ -67,6 +69,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private static final String VK_LIVES_URL = "https://vkvideo.ru/@radiokp/lives";
     private static final String RUTUBE_LIVE_FEED_URL = "https://rutube.ru/feeds/stream/";
     private static final String PREFS = "radio_kp_preferences";
+    private static final String VK_API_ENDPOINT = "https://vk.com/al_video.php";
+    private static final String VK_PROBE_USER_AGENT = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private SharedPreferences preferences;
@@ -88,6 +92,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private volatile int currentSource = SOURCE_VK;
     private volatile int webSource = SOURCE_VK;
     private volatile String currentPageUrl = VK_LIVES_URL;
+    private volatile String vkSelectedVideoUrl = "";
+    private volatile boolean vkProbeRunning = false;
     // True only after the VK feed scanner selected a card with an explicit LIVE badge.
     private volatile boolean vkLiveCardSelected = false;
     private volatile boolean streamStarted = false;
@@ -97,7 +103,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private int rutubeQualityKbps = 64;
     private int radioQualityKbps = 64;
     private int attemptedSourcesMask = 0;
-    private int attemptId = 0;
+    private volatile int attemptId = 0;
     private long liveStartEpochMs = 0L;
     // Fallback clock: when the platform does not expose the real broadcast start.
     private long sessionStartEpochMs = 0L;
@@ -376,6 +382,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         attemptedSourcesMask |= bit;
         currentSource = source;
         vkLiveCardSelected = false;
+        vkSelectedVideoUrl = "";
+        vkProbeRunning = false;
         streamStarted = false;
         liveSessionActive = liveStartEpochMs > 0L || sessionStartEpochMs > 0L;
         isPlaying = false;
@@ -421,7 +429,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 tryNextSource("Время ожидания истекло");
             }
         };
-        handler.postDelayed(sourceTimeout, 35000L);
+        handler.postDelayed(sourceTimeout, source == SOURCE_VK ? 55000L : 35000L);
     }
 
     private void startRadioStream() {
@@ -448,6 +456,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     private void startPlayerService(String url, ArrayList<String> urls, ArrayList<String> dashUrls, String referer, String sourceName, int qualityKbps, boolean mp3) {
+        startPlayerService(url, urls, dashUrls, referer, sourceName, qualityKbps, mp3, null);
+    }
+
+    private void startPlayerService(String url, ArrayList<String> urls, ArrayList<String> dashUrls, String referer, String sourceName, int qualityKbps, boolean mp3, String cookie) {
         Intent intent = new Intent(this, AudioPlaybackService.class)
                 .setAction(AudioPlaybackService.ACTION_PLAY)
                 .putExtra(AudioPlaybackService.EXTRA_URL, url)
@@ -456,7 +468,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 .putExtra(AudioPlaybackService.EXTRA_REFERER, referer)
                 .putExtra(AudioPlaybackService.EXTRA_SOURCE_NAME, sourceName)
                 .putExtra(AudioPlaybackService.EXTRA_MAX_AUDIO_BITRATE, qualityKbps)
-                .putExtra(AudioPlaybackService.EXTRA_IS_MP3, mp3);
+                .putExtra(AudioPlaybackService.EXTRA_IS_MP3, mp3)
+                .putExtra(AudioPlaybackService.EXTRA_COOKIE, cookie);
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent); else startService(intent);
         updateControls();
     }
@@ -740,14 +753,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             "async function probe(){var ids=[];for(var pass=0;pass<4;pass++){ids=collect();if(ids.length)break;await new Promise(function(r){setTimeout(r,600)});}" +
             "if(window.AudioBridge)window.AudioBridge.onVkProbeCandidateCount(ids.length);" +
             "if(!ids.length){if(window.AudioBridge)window.AudioBridge.onVkProbeFinished('В LIVE-разделе не нашёл ссылок на видеокарточки');return;}" +
-            "var endpoint=new URL('/al_video.php',location.origin).toString();var checked=0;" +
-            "for(var n=0;n<ids.length&&n<8;n++){var body=new URLSearchParams();body.set('act','show');body.set('video',ids[n]);body.set('al','1');" +
-            "try{var controller=window.AbortController?new AbortController():null;var timer=controller?setTimeout(function(){controller.abort()},3500):null;" +
-            "var response=await fetch(endpoint,{method:'POST',credentials:'include',headers:{'X-Requested-With':'XMLHttpRequest','Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},body:body.toString(),signal:controller?controller.signal:undefined});" +
-            "var txt=await response.text();checked++;var accepted=window.AudioBridge?window.AudioBridge.onVkProbeResponse(ids[n],response.status,txt):false;" +
-            "if(accepted)return;if(timer)clearTimeout(timer);" +
-            "}catch(e){checked++;if(window.AudioBridge)window.AudioBridge.onVkProbeError(ids[n],String(e));}}" +
-            "if(window.AudioBridge)window.AudioBridge.onVkProbeFinished('Проверено видео: '+checked+' из '+Math.min(ids.length,8)+' · активный эфир live=2 не найден');}" +
+            "if(window.AudioBridge)window.AudioBridge.onVkProbeCandidates(JSON.stringify(ids.slice(0,6)));}" +
             "setTimeout(probe,250);" +
             "}catch(e){if(window.AudioBridge)window.AudioBridge.onVkProbeFinished('Ошибка запуска VK API probe: '+String(e));}})();";
 
@@ -780,6 +786,77 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             "setTimeout(tick,1200);" +
             "}catch(e){}})();";
 
+    /**
+     * Use VK's canonical al_video.php endpoint natively. A WebView POST from
+     * vkvideo.ru to vk.com is cross-origin and may be blocked by browser policy.
+     */
+    private void probeVkVideosNative(ArrayList<String> videoIds, int expectedAttemptId) {
+        Thread worker = new Thread(() -> {
+            int checked = 0;
+            String lastResult = "ответа нет";
+            for (String videoId : videoIds) {
+                if (expectedAttemptId != attemptId || currentSource != SOURCE_VK || webSource != SOURCE_VK || streamStarted) break;
+                HttpURLConnection connection = null;
+                try {
+                    URL endpoint = new URL(VK_API_ENDPOINT);
+                    connection = (HttpURLConnection) endpoint.openConnection();
+                    connection.setConnectTimeout(3500);
+                    connection.setReadTimeout(4500);
+                    connection.setInstanceFollowRedirects(true);
+                    connection.setRequestMethod("POST");
+                    connection.setDoOutput(true);
+                    connection.setRequestProperty("User-Agent", VK_PROBE_USER_AGENT);
+                    connection.setRequestProperty("Referer", VK_API_ENDPOINT);
+                    connection.setRequestProperty("X-Requested-With", "XMLHttpRequest");
+                    connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+                    connection.setRequestProperty("Accept", "*/*");
+                    String cookie = CookieManager.getInstance().getCookie(VK_API_ENDPOINT);
+                    if (cookie != null && !cookie.isEmpty()) connection.setRequestProperty("Cookie", cookie);
+                    String form = "act=show&video=" + URLEncoder.encode(videoId, "UTF-8") + "&al=1";
+                    byte[] formBytes = form.getBytes(StandardCharsets.UTF_8);
+                    connection.setFixedLengthStreamingMode(formBytes.length);
+                    try (OutputStream output = connection.getOutputStream()) {
+                        output.write(formBytes);
+                    }
+                    int httpCode = connection.getResponseCode();
+                    InputStream response = httpCode >= 400 ? connection.getErrorStream() : connection.getInputStream();
+                    byte[] responseBytes = response == null ? new byte[0] : readAll(response, 4 * 1024 * 1024);
+                    String body = new String(responseBytes, StandardCharsets.UTF_8);
+                    checked++;
+                    ArrayList<String> streams = httpCode >= 200 && httpCode < 300
+                            ? extractVkHlsUrls(body) : new ArrayList<>();
+                    String contentType = connection.getContentType();
+                    lastResult = "HTTP " + httpCode + " · " + (contentType == null ? "тип неизвестен" : contentType)
+                            + " · " + findVkLiveStateSummary(body) + " · HLS " + streams.size();
+                    if (!streams.isEmpty()) {
+                        if (expectedAttemptId != attemptId || currentSource != SOURCE_VK || streamStarted) return;
+                        vkSelectedVideoUrl = "https://vkvideo.ru/video" + videoId;
+                        currentPageUrl = vkSelectedVideoUrl;
+                        vkLiveCardSelected = true;
+                        setVkDiagnostic("VK API: " + videoId + " · " + lastResult + " · запускаю аудио");
+                        handleStreamResolved(streams, new ArrayList<>(), SOURCE_VK,
+                                extractLiveStartTimeMs(body, SOURCE_VK));
+                        return;
+                    }
+                    setVkDiagnostic("VK API " + videoId + " · " + lastResult
+                            + " · cookie " + ((cookie == null || cookie.isEmpty()) ? "нет" : "есть"));
+                } catch (Exception error) {
+                    checked++;
+                    lastResult = error.getClass().getSimpleName();
+                    setVkDiagnostic("VK API " + videoId + " · " + lastResult);
+                } finally {
+                    if (connection != null) connection.disconnect();
+                }
+            }
+            if (expectedAttemptId == attemptId && currentSource == SOURCE_VK && !streamStarted) {
+                setVkDiagnostic("VK API: проверено " + checked + " карточек · " + lastResult + " · активный HLS не найден");
+            }
+            vkProbeRunning = false;
+        }, "RadioKp-VkNativeProbe");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
     private final class StreamBridge {
         private final int source;
         StreamBridge(int source) { this.source = source; }
@@ -799,7 +876,24 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         }
         @JavascriptInterface public void onVkProbeCandidateCount(int count) {
             if (source != SOURCE_VK || source != currentSource || streamStarted) return;
-            setVkDiagnostic("LIVE-лента открыта · найдено видеокарточек: " + count + " · проверяю статус каждого видео через al_video.php");
+            setVkDiagnostic("LIVE-лента открыта · найдено видеокарточек: " + count + " · проверяю их через VK API");
+        }
+        @JavascriptInterface public void onVkProbeCandidates(String json) {
+            if (source != SOURCE_VK || source != currentSource || source != webSource || streamStarted || vkProbeRunning) return;
+            ArrayList<String> ids = new ArrayList<>();
+            try {
+                JSONArray array = new JSONArray(json == null ? "[]" : json);
+                for (int i = 0; i < array.length() && ids.size() < 6; i++) {
+                    String id = array.optString(i, "");
+                    if (id.matches("-?\\d+_\\d+") && !ids.contains(id)) ids.add(id);
+                }
+            } catch (Exception ignored) { }
+            if (ids.isEmpty()) {
+                setVkDiagnostic("VK: видеокарточки не содержат распознаваемых ID");
+                return;
+            }
+            vkProbeRunning = true;
+            probeVkVideosNative(ids, attemptId);
         }
         @JavascriptInterface public boolean onVkProbeResponse(String videoId, int httpCode, String body) {
             if (source != SOURCE_VK || source != currentSource || source != webSource || streamStarted
@@ -809,6 +903,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             setVkDiagnostic("al_video.php · " + videoId + " · HTTP " + httpCode + " · " + state
                     + " · HLS: " + streams.size());
             if (streams.isEmpty()) return false;
+            vkSelectedVideoUrl = "https://vkvideo.ru/video" + videoId;
+            currentPageUrl = vkSelectedVideoUrl;
+            vkLiveCardSelected = true;
             long liveStartMs = extractLiveStartTimeMs(body, SOURCE_VK);
             handleStreamResolved(streams, new ArrayList<>(), SOURCE_VK, liveStartMs);
             return true;
@@ -1391,7 +1488,12 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private static boolean isVkCdnHost(String host) {
         if (host == null) return false;
         host = host.toLowerCase(Locale.ROOT);
-        return host.endsWith(".okcdn.ru") || host.endsWith(".vkuservideo.net") || host.endsWith(".userapi.com") || host.equals("vkvideo.ru") || host.endsWith(".vkvideo.ru") || host.equals("vk.com") || host.endsWith(".vk.com");
+        return host.endsWith(".okcdn.ru") || host.endsWith(".vkuservideo.net") || host.endsWith(".vkuservideo.com")
+                || host.endsWith(".vkuservideo.ru") || host.endsWith(".userapi.com") || host.endsWith(".vkuseraudio.net")
+                || host.endsWith(".vkuseraudio.ru") || host.endsWith(".vkuseraudio.com") || host.endsWith(".vkuserlive.net")
+                || host.endsWith(".vkuser.net") || host.endsWith(".cdn-vk.ru") || host.endsWith(".cdn-vk.com")
+                || host.endsWith(".mycdn.me") || host.equals("vkvideo.ru") || host.endsWith(".vkvideo.ru")
+                || host.equals("vk.com") || host.endsWith(".vk.com");
     }
 
     private static boolean isVkHost(String host) {
@@ -1470,9 +1572,12 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             Runnable play = () -> {
                 if (sourcePageButton != null) sourcePageButton.setVisibility(View.GONE);
                 releaseWebView();
-                String referer = source == SOURCE_VK ? "https://vkvideo.ru/" : "https://rutube.ru/";
+                String referer = source == SOURCE_VK
+                        ? (vkSelectedVideoUrl.isEmpty() ? "https://vkvideo.ru/" : vkSelectedVideoUrl)
+                        : "https://rutube.ru/";
                 int quality = source == SOURCE_RUTUBE ? rutubeQualityKbps : vkQualityKbps;
-                startPlayerService(primaryUrl, safeHls, safeDash, referer, SOURCE_NAMES[source], quality, false);
+                String streamCookie = source == SOURCE_VK ? CookieManager.getInstance().getCookie(primaryUrl) : null;
+                startPlayerService(primaryUrl, safeHls, safeDash, referer, SOURCE_NAMES[source], quality, false, streamCookie);
             };
             if (webView != null) {
                 webView.evaluateJavascript("document.querySelectorAll('video,audio').forEach(function(v){try{v.muted=true;v.pause()}catch(e){}})", value -> runOnUiThread(play));
@@ -1653,7 +1758,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 if (liveSessionActive) updateElapsedView();
                 else liveProgress.setProgress(0);
                 if (autoFailover) {
-                    statusView.setText("Поток " + SOURCE_NAMES[currentSource] + " прервался. Ищу резервный источник…");
+                    String detail = message.substring("SOURCE_ERROR:".length()).trim();
+                statusView.setText("Ошибка " + SOURCE_NAMES[currentSource] + ": " + detail + " · переключаюсь на резервный источник…");
                     handler.postDelayed(() -> tryNextSource("Ошибка воспроизведения"), 450L);
                 } else {
                     statusView.setText("Не удалось воспроизвести " + SOURCE_NAMES[currentSource] + ". Выберите другой источник.");
