@@ -981,9 +981,24 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private static JSONObject findVkAlVideoPlayerData(Object parsed) {
         if (!(parsed instanceof JSONObject)) return null;
         JSONObject root = (JSONObject) parsed;
-        JSONArray payload = root.optJSONArray("payload");
-        if (payload == null || payload.length() == 0) return null;
-        JSONObject options = payload.optJSONObject(payload.length() - 1);
+
+        // Actual al_video.php JSON shape is:
+        // {"payload": ["0", [ ... infoPage, ..., opts ]]}
+        // yt-dlp first unpacks payload into (code, payload), then reads
+        // payload[-1].player.params[0]. The inner array is essential.
+        JSONArray envelope = root.optJSONArray("payload");
+        if (envelope == null || envelope.length() < 2) return null;
+        Object responseCode = envelope.opt(0);
+        String code = String.valueOf(responseCode);
+        if ("3".equals(code) || "8".equals(code)) return null;
+
+        JSONArray optionsList = envelope.optJSONArray(1);
+        if (optionsList == null || optionsList.length() == 0) {
+            // Compatibility with a flattened payload variant, if VK ever
+            // returns it. Never treat an arbitrary status entry as opts.
+            return null;
+        }
+        JSONObject options = optionsList.optJSONObject(optionsList.length() - 1);
         if (options == null) return null;
         JSONObject player = options.optJSONObject("player");
         if (player == null) return null;
