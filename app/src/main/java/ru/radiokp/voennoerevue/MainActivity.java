@@ -797,67 +797,104 @@ public final class MainActivity extends Activity implements AudioPlaybackService
      * Use VK's canonical al_video.php endpoint natively. A WebView POST from
      * vkvideo.ru to vk.com is cross-origin and may be blocked by browser policy.
      */
+    private static final class VkProbeResult {
+        final String videoId;
+        final String summary;
+        final ArrayList<String> streams;
+        final long liveStartMs;
+        VkProbeResult(String videoId, String summary, ArrayList<String> streams, long liveStartMs) {
+            this.videoId = videoId;
+            this.summary = summary;
+            this.streams = streams;
+            this.liveStartMs = liveStartMs;
+        }
+    }
+
+    private VkProbeResult requestVkVideoNative(String videoId, String cookie) {
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(VK_API_ENDPOINT).openConnection();
+            connection.setConnectTimeout(4500);
+            connection.setReadTimeout(5500);
+            connection.setInstanceFollowRedirects(true);
+            connection.setRequestMethod("POST");
+            connection.setDoOutput(true);
+            connection.setRequestProperty("User-Agent", VK_PROBE_USER_AGENT);
+            connection.setRequestProperty("Referer", VK_API_ENDPOINT);
+            connection.setRequestProperty("X-Requested-With", "XMLHttpRequest");
+            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+            connection.setRequestProperty("Accept", "*/*");
+            if (cookie != null && !cookie.isEmpty()) connection.setRequestProperty("Cookie", cookie);
+            String form = "act=show&video=" + URLEncoder.encode(videoId, "UTF-8") + "&al=1";
+            byte[] formBytes = form.getBytes(StandardCharsets.UTF_8);
+            connection.setFixedLengthStreamingMode(formBytes.length);
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(formBytes);
+            }
+            int code = connection.getResponseCode();
+            InputStream response = code >= 400 ? connection.getErrorStream() : connection.getInputStream();
+            byte[] bytes = response == null ? new byte[0] : readAll(response, 4 * 1024 * 1024);
+            String body = new String(bytes, StandardCharsets.UTF_8);
+            ArrayList<String> streams = code >= 200 && code < 300
+                    ? extractVkHlsUrls(body) : new ArrayList<>();
+            String type = connection.getContentType();
+            String summary = "HTTP " + code + " · " + (type == null ? "без Content-Type" : type)
+                    + " · " + findVkLiveStateSummary(body) + " · HLS " + streams.size();
+            long liveStart = streams.isEmpty() ? 0L : extractLiveStartTimeMs(body, SOURCE_VK);
+            return new VkProbeResult(videoId, summary, streams, liveStart);
+        } catch (Exception error) {
+            return new VkProbeResult(videoId, error.getClass().getSimpleName(), new ArrayList<>(), 0L);
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
     private void probeVkVideosNative(ArrayList<String> videoIds, int expectedAttemptId) {
         Thread worker = new Thread(() -> {
+            String cookie = CookieManager.getInstance().getCookie(VK_API_ENDPOINT);
+            if (cookie == null || cookie.isEmpty()) cookie = CookieManager.getInstance().getCookie(VK_LIVES_URL);
+            final String requestCookie = cookie;
             int checked = 0;
             String lastResult = "ответа нет";
+            ExecutorService pool = Executors.newFixedThreadPool(Math.min(VK_PROBE_PARALLELISM, videoIds.size()));
+            CompletionService<VkProbeResult> completed = new ExecutorCompletionService<>(pool);
+            int submitted = 0;
             for (String videoId : videoIds) {
                 if (expectedAttemptId != attemptId || currentSource != SOURCE_VK || webSource != SOURCE_VK || streamStarted) break;
-                HttpURLConnection connection = null;
-                try {
-                    URL endpoint = new URL(VK_API_ENDPOINT);
-                    connection = (HttpURLConnection) endpoint.openConnection();
-                    connection.setConnectTimeout(3500);
-                    connection.setReadTimeout(4500);
-                    connection.setInstanceFollowRedirects(true);
-                    connection.setRequestMethod("POST");
-                    connection.setDoOutput(true);
-                    connection.setRequestProperty("User-Agent", VK_PROBE_USER_AGENT);
-                    connection.setRequestProperty("Referer", VK_API_ENDPOINT);
-                    connection.setRequestProperty("X-Requested-With", "XMLHttpRequest");
-                    connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
-                    connection.setRequestProperty("Accept", "*/*");
-                    String cookie = CookieManager.getInstance().getCookie(VK_API_ENDPOINT);
-                    if (cookie == null || cookie.isEmpty()) cookie = CookieManager.getInstance().getCookie(VK_LIVES_URL);
-                    if (cookie != null && !cookie.isEmpty()) connection.setRequestProperty("Cookie", cookie);
-                    String form = "act=show&video=" + URLEncoder.encode(videoId, "UTF-8") + "&al=1";
-                    byte[] formBytes = form.getBytes(StandardCharsets.UTF_8);
-                    connection.setFixedLengthStreamingMode(formBytes.length);
-                    try (OutputStream output = connection.getOutputStream()) {
-                        output.write(formBytes);
-                    }
-                    int httpCode = connection.getResponseCode();
-                    InputStream response = httpCode >= 400 ? connection.getErrorStream() : connection.getInputStream();
-                    byte[] responseBytes = response == null ? new byte[0] : readAll(response, 4 * 1024 * 1024);
-                    String body = new String(responseBytes, StandardCharsets.UTF_8);
+                completed.submit(() -> requestVkVideoNative(videoId, requestCookie));
+                submitted++;
+            }
+            pool.shutdown();
+            long deadline = System.currentTimeMillis() + 42000L;
+            try {
+                while (checked < submitted
+                        && expectedAttemptId == attemptId && currentSource == SOURCE_VK
+                        && webSource == SOURCE_VK && !streamStarted) {
+                    long remaining = deadline - System.currentTimeMillis();
+                    if (remaining <= 0L) break;
+                    Future<VkProbeResult> future = completed.poll(remaining, TimeUnit.MILLISECONDS);
+                    if (future == null) break;
+                    VkProbeResult result = future.get();
                     checked++;
-                    ArrayList<String> streams = httpCode >= 200 && httpCode < 300
-                            ? extractVkHlsUrls(body) : new ArrayList<>();
-                    String contentType = connection.getContentType();
-                    lastResult = "HTTP " + httpCode + " · " + (contentType == null ? "тип неизвестен" : contentType)
-                            + " · " + findVkLiveStateSummary(body) + " · HLS " + streams.size();
-                    if (!streams.isEmpty()) {
-                        if (expectedAttemptId != attemptId || currentSource != SOURCE_VK || streamStarted) return;
-                        vkSelectedVideoUrl = "https://vkvideo.ru/video" + videoId;
+                    lastResult = result.videoId + " · " + result.summary;
+                    if (!result.streams.isEmpty()
+                            && expectedAttemptId == attemptId && currentSource == SOURCE_VK && !streamStarted) {
+                        vkSelectedVideoUrl = "https://vkvideo.ru/video" + result.videoId;
                         currentPageUrl = vkSelectedVideoUrl;
                         vkLiveCardSelected = true;
-                        setVkDiagnostic("VK API: " + videoId + " · " + lastResult + " · запускаю аудио");
-                        handleStreamResolved(streams, new ArrayList<>(), SOURCE_VK,
-                                extractLiveStartTimeMs(body, SOURCE_VK));
-                        return;
+                        setVkDiagnostic("Найден активный эфир · " + lastResult + " · запускаю аудио");
+                        handleStreamResolved(result.streams, new ArrayList<>(), SOURCE_VK, result.liveStartMs);
+                        break;
                     }
-                    setVkDiagnostic("VK API " + videoId + " · " + lastResult
-                            + " · cookie " + ((cookie == null || cookie.isEmpty()) ? "нет" : "есть"));
-                } catch (Exception error) {
-                    checked++;
-                    lastResult = error.getClass().getSimpleName();
-                    setVkDiagnostic("VK API " + videoId + " · " + lastResult);
-                } finally {
-                    if (connection != null) connection.disconnect();
                 }
+            } catch (Exception error) {
+                lastResult = error.getClass().getSimpleName();
+            } finally {
+                pool.shutdownNow();
             }
             if (expectedAttemptId == attemptId && currentSource == SOURCE_VK && !streamStarted) {
-                setVkDiagnostic("VK API: проверено " + checked + " карточек · " + lastResult + " · активный HLS не найден");
+                setVkDiagnostic("Проверено " + checked + " из " + videoIds.size()
+                        + " видео · активный live=2 не найден · " + lastResult);
             }
             vkProbeRunning = false;
         }, "RadioKp-VkNativeProbe");
