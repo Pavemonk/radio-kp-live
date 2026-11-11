@@ -60,6 +60,12 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.concurrent.CompletionService;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 public final class MainActivity extends Activity implements AudioPlaybackService.PlaybackStateListener {
     private static final int SOURCE_VK = 0;
@@ -71,6 +77,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private static final String PREFS = "radio_kp_preferences";
     private static final String VK_API_ENDPOINT = "https://vk.com/al_video.php";
     private static final String VK_PROBE_USER_AGENT = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
+    private static final String VK_RADIO_GROUP_OWNER_ID = "-114816593";
+    private static final int MAX_VK_PROBE_IDS = 48;
+    private static final int VK_PROBE_PARALLELISM = 8;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private SharedPreferences preferences;
@@ -742,19 +751,20 @@ public final class MainActivity extends Activity implements AudioPlaybackService
      */
     private static final String AUTO_OPEN_VK_LIVE_SCRIPT = "(function(){try{" +
             "if(window.__radioKpLiveProbe)return;window.__radioKpLiveProbe=true;" +
+            "var expectedOwner='" + VK_RADIO_GROUP_OWNER_ID + "';" +
             "function idFrom(h){try{h=decodeURIComponent(String(h||''))}catch(e){}" +
-            "var m=h.match(/(?:video|live)(-?[0-9]+)_([0-9]+)/i);if(m)return m[1]+'_'+m[2];" +
-            "try{var u=new URL(h,location.href),o=u.searchParams.get('oid'),i=u.searchParams.get('id');if(o&&i)return o+'_'+i}catch(e){}return null;}" +
-            "function collect(){var ids=[],seen={};function add(h){var id=idFrom(h);if(id&&!seen[id]){seen[id]=1;ids.push(id);}}" +
+            "var m=h.match(/(?:video|live)(-?[0-9]+)_([0-9]+)/i);if(m&&m[1]===expectedOwner)return m[1]+'_'+m[2];" +
+            "try{var u=new URL(h,location.href),o=u.searchParams.get('oid'),i=u.searchParams.get('id');if(o===expectedOwner&&i)return o+'_'+i}catch(e){}return null;}" +
+            "function collect(){var ids=[],seen={};function add(h){var id=idFrom(h);if(id&&!seen[id]&&ids.length<" + MAX_VK_PROBE_IDS + "){seen[id]=1;ids.push(id);}}" +
             "try{document.querySelectorAll('a[href]').forEach(function(a){add(a.href)});" +
             "var html=document.documentElement?document.documentElement.innerHTML:'';" +
-            "var re=/(?:video|live)(-?[0-9]+)_([0-9]+)/ig,m;while((m=re.exec(html))&&ids.length<24)add(m[0]);" +
+            "var re=/(?:video|live)(-?[0-9]+)_([0-9]+)/ig,m;while((m=re.exec(html))&&ids.length<" + MAX_VK_PROBE_IDS + ")add(m[0]);" +
             "}catch(e){}return ids;}" +
-            "async function probe(){var ids=[];for(var pass=0;pass<4;pass++){ids=collect();if(ids.length)break;await new Promise(function(r){setTimeout(r,600)});}" +
+            "async function probe(){var ids=[];for(var pass=0;pass<8;pass++){ids=collect();if(ids.length)break;await new Promise(function(r){setTimeout(r,500)});}" +
             "if(window.AudioBridge)window.AudioBridge.onVkProbeCandidateCount(ids.length);" +
-            "if(!ids.length){if(window.AudioBridge)window.AudioBridge.onVkProbeFinished('В LIVE-разделе не нашёл ссылок на видеокарточки');return;}" +
-            "if(window.AudioBridge)window.AudioBridge.onVkProbeCandidates(JSON.stringify(ids.slice(0,6)));}" +
-            "setTimeout(probe,250);" +
+            "if(!ids.length){if(window.AudioBridge)window.AudioBridge.onVkProbeFinished('В LIVE-разделе Радио КП не найдено видео группы '+expectedOwner);return;}" +
+            "if(window.AudioBridge)window.AudioBridge.onVkProbeCandidates(JSON.stringify(ids));}" +
+            "setTimeout(probe,300);" +
             "}catch(e){if(window.AudioBridge)window.AudioBridge.onVkProbeFinished('Ошибка запуска VK API probe: '+String(e));}})();";
 
     private static final String PROBE_CURRENT_VK_VIDEO_SCRIPT = "(function(){try{" +
@@ -881,16 +891,17 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             ArrayList<String> ids = new ArrayList<>();
             try {
                 JSONArray array = new JSONArray(json == null ? "[]" : json);
-                for (int i = 0; i < array.length() && ids.size() < 6; i++) {
+                for (int i = 0; i < array.length() && ids.size() < MAX_VK_PROBE_IDS; i++) {
                     String id = array.optString(i, "");
-                    if (id.matches("-?\\d+_\\d+") && !ids.contains(id)) ids.add(id);
+                    if (id.matches("-?\\d+_\\d+") && id.startsWith(VK_RADIO_GROUP_OWNER_ID + "_") && !ids.contains(id)) ids.add(id);
                 }
             } catch (Exception ignored) { }
             if (ids.isEmpty()) {
-                setVkDiagnostic("VK: видеокарточки не содержат распознаваемых ID");
+                setVkDiagnostic("VK: на LIVE-странице не найдено ID видео группы " + VK_RADIO_GROUP_OWNER_ID);
                 return;
             }
             vkProbeRunning = true;
+            setVkDiagnostic("Видео группы Радио КП: " + ids.size() + " · проверяю параллельно до " + VK_PROBE_PARALLELISM);
             probeVkVideosNative(ids, attemptId);
         }
         @JavascriptInterface public boolean onVkProbeResponse(String videoId, int httpCode, String body) {
