@@ -180,8 +180,6 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             liveScaleFromMetadata = false;
         }
         buildUi();
-        android.webkit.WebView.getCurrentWebViewPackage();
-        android.webkit.WebView.getCurrentWebViewPackage();
         debugLog("APP", "onCreate · autoStart=" + autoStart + " · autoFailover=" + autoFailover
                 + " · device=" + Build.MANUFACTURER + " " + Build.MODEL
                 + " · Android=" + Build.VERSION.RELEASE + " API=" + Build.VERSION.SDK_INT
@@ -665,14 +663,17 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 currentPageUrl = url;
                 debugLog("WEB", "page finished · " + debugSafeUrl(url) + " · title=" + safeShort(view.getTitle(), 100));
                 if (source == SOURCE_VK && isVkPage(url)) {
+                    debugLog("VK", "installing player hook on " + debugSafeUrl(url));
                     view.evaluateJavascript(INSTALL_VK_HOOK_SCRIPT, null);
                     if (isVkLiveFeedPage(url)) {
+                        debugLog("VK", "injecting LIVE feed scanner");
                         view.postDelayed(() -> {
                             if (webView == view && currentSource == SOURCE_VK && !streamStarted) {
                                 view.evaluateJavascript(AUTO_OPEN_VK_LIVE_SCRIPT, null);
                             }
                         }, 500L);
                     } else if (isSelectedVkVideoPage(url)) {
+                        debugLog("VK", "video page detected; injecting single video probe");
                         view.postDelayed(() -> {
                             if (webView == view && currentSource == SOURCE_VK && !streamStarted) {
                                 view.evaluateJavascript(PROBE_CURRENT_VK_VIDEO_SCRIPT, null);
@@ -938,6 +939,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     private void probeVkVideosNative(ArrayList<String> videoIds, int expectedAttemptId) {
+        debugLog("VK_PROBE_START", "videoIds=" + videoIds.size() + " · parallel=" + VK_PROBE_PARALLELISM
+                + " · IDs=" + videoIds + " · attempt=" + expectedAttemptId);
         Thread worker = new Thread(() -> {
             String cookie = CookieManager.getInstance().getCookie(VK_API_ENDPOINT);
             if (cookie == null || cookie.isEmpty()) cookie = CookieManager.getInstance().getCookie(VK_LIVES_URL);
@@ -1001,8 +1004,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             if (source != SOURCE_VK || source != currentSource || source != webSource || !isSelectedVkVideoPage(url)) return;
             vkLiveCardSelected = true;
             currentPageUrl = url;
+            debugLog("VK_SELECTION", "selected page=" + debugSafeUrl(url));
         }
         @JavascriptInterface public void onLiveScanFailed() {
+            debugLog("VK_SCAN_FAIL", "scanner reports no LIVE card");
             if (source != SOURCE_VK || source != currentSource || source != webSource || streamStarted) return;
             runOnUiThread(() -> {
                 if (currentSource == SOURCE_VK && !streamStarted) {
@@ -2061,7 +2066,16 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                     if (last != null) {
                         JSONObject player = last.optJSONObject("player");
                         shape += " final.keys=" + limitedJsonKeys(last, 18);
-                        if (player != null) shape += " player.keys=" + limitedJsonKeys(player, 18);
+                        if (player != null) {
+                            shape += " player.keys=" + limitedJsonKeys(player, 18);
+                            JSONArray params = player.optJSONArray("params");
+                            shape += " params.len=" + (params == null ? "null" : params.length());
+                            JSONObject firstParams = params == null ? null : params.optJSONObject(0);
+                            if (firstParams != null) {
+                                shape += " params[0].keys=" + limitedJsonKeys(firstParams, 24)
+                                        + " live=" + firstParams.opt("live");
+                            }
+                        }
                     }
                 }
             }
