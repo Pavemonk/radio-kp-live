@@ -760,10 +760,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private static final String PROBE_CURRENT_VK_VIDEO_SCRIPT = "(function(){try{" +
             "var h=location.href;try{h=decodeURIComponent(h)}catch(e){};var m=h.match(/(?:video|live)(-?[0-9]+)_([0-9]+)/i);" +
             "if(!m){if(window.AudioBridge)window.AudioBridge.onVkProbeFinished('Не удалось определить ID открытого видео VK');return;}" +
-            "var id=m[1]+'_'+m[2],body=new URLSearchParams();body.set('act','show');body.set('video',id);body.set('al','1');" +
-            "fetch(new URL('/al_video.php',location.origin).toString(),{method:'POST',credentials:'include',headers:{'X-Requested-With':'XMLHttpRequest','Content-Type':'application/x-www-form-urlencoded; charset=UTF-8'},body:body.toString()})" +
-            ".then(function(r){return r.text().then(function(t){if(window.AudioBridge)window.AudioBridge.onVkProbeResponse(id,r.status,t)})})" +
-            ".catch(function(e){if(window.AudioBridge)window.AudioBridge.onVkProbeFinished('Ошибка запроса видео VK: '+String(e))});" +
+            "var id=m[1]+'_'+m[2];if(window.AudioBridge)window.AudioBridge.onVkProbeCandidates(JSON.stringify([id]));" +
             "}catch(e){if(window.AudioBridge)window.AudioBridge.onVkProbeFinished('Ошибка проверки видео VK: '+String(e));}})();";
 
     private static final String INSTALL_RUTUBE_HOOK_SCRIPT = "(function(){try{if(window.__radioKpRutubeHook)return;window.__radioKpRutubeHook=true;" +
