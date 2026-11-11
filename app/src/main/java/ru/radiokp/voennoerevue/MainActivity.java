@@ -180,11 +180,16 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             liveScaleFromMetadata = false;
         }
         buildUi();
+        String webViewInfo = "API<26";
+        if (Build.VERSION.SDK_INT >= 26) {
+            android.content.pm.PackageInfo webViewPackage = WebView.getCurrentWebViewPackage();
+            webViewInfo = webViewPackage == null ? "unknown"
+                    : webViewPackage.packageName + "/" + webViewPackage.versionName;
+        }
         debugLog("APP", "onCreate · autoStart=" + autoStart + " · autoFailover=" + autoFailover
                 + " · device=" + Build.MANUFACTURER + " " + Build.MODEL
                 + " · Android=" + Build.VERSION.RELEASE + " API=" + Build.VERSION.SDK_INT
-                + " · WebView=" + (WebView.getCurrentWebViewPackage() == null ? "unknown" : WebView.getCurrentWebViewPackage().packageName)
-                + "/" + (WebView.getCurrentWebViewPackage() == null ? "unknown" : WebView.getCurrentWebViewPackage().versionName));
+                + " · WebView=" + webViewInfo);
         requestNotificationPermissionIfNeeded();
         if (autoStart) {
             statusView.setText("Запускаю основной источник — VK Видео…");
@@ -925,6 +930,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                     ? extractVkHlsUrls(body) : new ArrayList<>();
             String type = connection.getContentType();
             String summary = "HTTP " + code + " · " + (type == null ? "без Content-Type" : type)
+                    + " · bytes=" + bytes.length
                     + " · " + findVkLiveStateSummary(body) + " · HLS " + streams.size()
                     + " · cookie=" + (cookie == null || cookie.isEmpty() ? "нет" : "есть")
                     + " · " + debugJsonShape(body);
@@ -1045,6 +1051,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                     || body == null || body.length() > 4 * 1024 * 1024) return false;
             ArrayList<String> streams = extractVkHlsUrls(body);
             String state = findVkLiveStateSummary(body);
+            debugLog("VK_AL_VIDEO_BRIDGE", "id=" + videoId + " · HTTP " + httpCode
+                    + " · " + state + " · HLS=" + streams.size()
+                    + " · hosts=" + debugCandidateHosts(streams));
             setVkDiagnostic("al_video.php · " + videoId + " · HTTP " + httpCode + " · " + state
                     + " · HLS: " + streams.size());
             if (streams.isEmpty()) return false;
@@ -1057,6 +1066,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         }
         @JavascriptInterface public void onVkProbeError(String videoId, String error) {
             if (source != SOURCE_VK || source != currentSource || streamStarted) return;
+            debugLog("VK_AL_VIDEO_ERROR", "id=" + videoId + " · " + error);
             setVkDiagnostic("al_video.php · " + videoId + " · " + error);
         }
         @JavascriptInterface public void onVkProbeFinished(String message) {
