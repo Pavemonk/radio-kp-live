@@ -180,6 +180,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             liveScaleFromMetadata = false;
         }
         buildUi();
+        debugLog("APP", "onCreate · autoStart=" + autoStart + " · autoFailover=" + autoFailover
+                + " · Android=" + Build.VERSION.RELEASE + " API=" + Build.VERSION.SDK_INT
+                + " · WebView=" + WebView.getCurrentWebViewPackage());
         requestNotificationPermissionIfNeeded();
         if (autoStart) {
             statusView.setText("Запускаю основной источник — VK Видео…");
@@ -410,6 +413,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
     private void startSource(int source, boolean automatic) {
         if (source < SOURCE_VK || source > SOURCE_RADIO) return;
+        debugLog("SOURCE", "start · source=" + SOURCE_NAMES[source] + " · automatic=" + automatic + " · nextAttempt=" + (attemptId + 1));
         cancelSourceTimeout();
         attemptId++;
         if (!automatic) attemptedSourcesMask = 0;
@@ -439,6 +443,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         }
         webSource = source;
         currentPageUrl = source == SOURCE_VK ? VK_LIVES_URL : RUTUBE_LIVE_FEED_URL;
+        debugLog("SOURCE", "load feed · " + debugSafeUrl(currentPageUrl) + " · attempt=" + attemptId);
         statusView.setText(source == SOURCE_VK
                 ? "Ищу текущую прямую трансляцию VK…"
                 : "Ищу прямой эфир Радио КП в общей LIVE-ленте RuTube…");
@@ -460,6 +465,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         final int scheduledAttempt = attemptId;
         sourceTimeout = () -> {
             if (scheduledAttempt == attemptId && !streamStarted && currentSource == source) {
+                debugLog("TIMEOUT", "источник " + SOURCE_NAMES[source] + " · timeout callback · attempt=" + scheduledAttempt);
                 if (source == SOURCE_RUTUBE) {
                     statusView.setText("В LIVE-ленте RuTube не найден эфир Радио КП. Перехожу к следующему источнику…");
                 } else {
@@ -618,6 +624,14 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         cookies.setAcceptCookie(true);
         cookies.setAcceptThirdPartyCookies(webView, true);
         webView.addJavascriptInterface(new StreamBridge(source), "AudioBridge");
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override public boolean onConsoleMessage(ConsoleMessage message) {
+                if (message != null && message.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                    debugLog("WEB_CONSOLE", "JS error · line=" + message.lineNumber() + " · " + safeShort(message.message(), 220));
+                }
+                return true;
+            }
+        });
         webView.setWebViewClient(new WebViewClient() {
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 return false;
@@ -625,6 +639,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
             @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
                 currentPageUrl = url;
+                debugLog("WEB", "page started · " + debugSafeUrl(url));
                 if (source == SOURCE_VK && isSelectedVkVideoPage(url)) {
                     // Navigation to a video page was initiated from the selected LIVE card or by the user.
                     vkLiveCardSelected = true;
@@ -640,6 +655,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
             @Override public void onPageFinished(WebView view, String url) {
                 currentPageUrl = url;
+                debugLog("WEB", "page finished · " + debugSafeUrl(url) + " · title=" + safeShort(view.getTitle(), 100));
                 if (source == SOURCE_VK && isVkPage(url)) {
                     view.evaluateJavascript(INSTALL_VK_HOOK_SCRIPT, null);
                     if (isVkLiveFeedPage(url)) {
@@ -661,12 +677,28 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 }
             }
 
+            @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                if (request != null && request.isForMainFrame()) {
+                    debugLog("WEB_ERROR", "main frame · code=" + (error == null ? "?" : error.getErrorCode())
+                            + " · " + (error == null ? "" : safeShort(error.getDescription().toString(), 180))
+                            + " · " + debugSafeUrl(request.getUrl().toString()));
+                }
+            }
+
+            @Override public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
+                if (request != null && request.isForMainFrame()) {
+                    debugLog("WEB_HTTP", "main frame HTTP " + (response == null ? "?" : response.getStatusCode())
+                            + " · " + debugSafeUrl(request.getUrl().toString()));
+                }
+            }
+
             @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 String url = request.getUrl().toString();
                 String method = request.getMethod();
                 String host = request.getUrl().getHost();
                 if (!"GET".equalsIgnoreCase(method)) return super.shouldInterceptRequest(view, request);
                 if (source == SOURCE_VK && url.contains("video.getVideoDiscover") && isVkHost(host)) {
+                    debugLog("VK_DISCOVER", "intercept " + request.getMethod() + " · " + debugSafeUrl(url));
                     return fetchAndInspect(url, request.getRequestHeaders(), source);
                 }
                 if (source == SOURCE_RUTUBE && (url.contains("/api/play/options/") || url.contains("/api/video/")) && isRutubeHost(host)) {
@@ -696,6 +728,11 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             InputStream input = code >= 400 ? connection.getErrorStream() : connection.getInputStream();
             byte[] bytes = input == null ? new byte[0] : readAll(input, 4 * 1024 * 1024);
             String body = new String(bytes, StandardCharsets.UTF_8);
+            if (source == SOURCE_VK) {
+                debugLog("VK_HTTP", "HTTP " + code + " · type=" + connection.getContentType()
+                        + " · bytes=" + bytes.length + " · url=" + debugSafeUrl(url)
+                        + " · json=" + debugJsonShape(body));
+            }
             boolean selectedVkVideo = source != SOURCE_VK
                     || isVkLiveFeedPage(currentPageUrl)
                     || (vkLiveCardSelected && isSelectedVkVideoPage(currentPageUrl));
@@ -720,6 +757,11 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                     : new ArrayList<>();
             ArrayList<String> dashResolved = source == SOURCE_RUTUBE && selectedSourceMetadata
                     ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
+            if (source == SOURCE_VK) {
+                debugLog("VK_PARSE", "selected=" + selectedSourceMetadata + " · HLS=" + resolved.size()
+                        + " · HLS hosts=" + debugCandidateHosts(resolved)
+                        + " · liveStart=" + liveStartMs);
+            }
             if (!resolved.isEmpty() || !dashResolved.isEmpty()) {
                 handleStreamResolved(resolved, dashResolved, source, liveStartMs);
             } else if (liveStartMs > 0L) {
@@ -739,6 +781,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             return new WebResourceResponse("application/json", "UTF-8", code > 0 ? code : 200,
                     code >= 400 ? "Source response" : "OK", responseHeaders, new ByteArrayInputStream(bytes));
         } catch (Exception e) {
+            if (source == SOURCE_VK) debugLog("VK_HTTP_ERROR", e.getClass().getSimpleName() + " · " + safeShort(e.getMessage(), 220));
             return null;
         } finally {
             if (connection != null) connection.disconnect();
