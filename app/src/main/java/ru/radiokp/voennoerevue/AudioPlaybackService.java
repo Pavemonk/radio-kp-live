@@ -28,6 +28,7 @@ import androidx.media3.exoplayer.dash.DashMediaSource;
 import androidx.media3.exoplayer.source.ProgressiveMediaSource;
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
 import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.datasource.HttpDataSource;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
@@ -56,6 +57,7 @@ public final class AudioPlaybackService extends Service {
     public static final String EXTRA_SOURCE_NAME = "source_name";
     public static final String EXTRA_MAX_AUDIO_BITRATE = "max_audio_bitrate_kbps";
     public static final String EXTRA_IS_MP3 = "is_mp3";
+    public static final String EXTRA_COOKIE = "stream_cookie";
 
     private static final String CHANNEL_ID = "radio_kp_live_audio_v3";
     private static final int NOTIFICATION_ID = 6107;
@@ -80,6 +82,7 @@ public final class AudioPlaybackService extends Service {
     private ArrayList<String> currentCandidateUrls = new ArrayList<>();
     private ArrayList<String> currentDashCandidateUrls = new ArrayList<>();
     private String currentReferer = "https://vkvideo.ru/";
+    private String currentCookie = "";
     private String currentSourceName = "Радио КП";
     private boolean currentIsMp3 = false;
     private int maxAudioBitrateKbps = 64;
@@ -146,7 +149,7 @@ public final class AudioPlaybackService extends Service {
             }
 
             @Override public void onPlayerError(PlaybackException error) {
-                handlePlaybackFailure(error.getErrorCodeName());
+                handlePlaybackFailure(describePlaybackError(error));
             }
         });
     }
@@ -162,6 +165,8 @@ public final class AudioPlaybackService extends Service {
             String sourceName = intent.getStringExtra(EXTRA_SOURCE_NAME);
             int quality = intent.getIntExtra(EXTRA_MAX_AUDIO_BITRATE, maxAudioBitrateKbps);
             boolean isMp3 = intent.getBooleanExtra(EXTRA_IS_MP3, false);
+            currentCookie = intent.getStringExtra(EXTRA_COOKIE);
+            if (currentCookie == null) currentCookie = "";
             ArrayList<String> suppliedCandidates = intent.getStringArrayListExtra(EXTRA_URL_CANDIDATES);
             currentCandidateUrls = new ArrayList<>();
             if (suppliedCandidates != null) {
@@ -443,6 +448,7 @@ public final class AudioPlaybackService extends Service {
                 ? "https://rutube.ru"
                 : (currentReferer.startsWith("https://radiokp.ru") ? "https://radiokp.ru" : "https://vkvideo.ru"));
         headers.put("Accept", "*/*");
+        if (currentCookie != null && !currentCookie.isEmpty()) headers.put("Cookie", currentCookie);
         return headers;
     }
 
@@ -906,12 +912,29 @@ public final class AudioPlaybackService extends Service {
             if (!scheme.equals("https") || (!isHlsManifest(url) && !isDashManifest(url))) return false;
             boolean allowedHost = host.endsWith(".okcdn.ru") || host.endsWith(".vkuservideo.net") || host.endsWith(".userapi.com")
                     || host.equals("vkvideo.ru") || host.endsWith(".vkvideo.ru") || host.equals("vk.com") || host.endsWith(".vk.com")
+                    || host.endsWith(".vkuseraudio.net") || host.endsWith(".vkuseraudio.ru") || host.endsWith(".vkuseraudio.com")
+                    || host.endsWith(".vkuserlive.net") || host.endsWith(".vkuser.net") || host.endsWith(".vkuservideo.com")
+                    || host.endsWith(".vkuservideo.ru") || host.endsWith(".cdn-vk.ru") || host.endsWith(".cdn-vk.com")
+                    || host.endsWith(".mycdn.me")
                     || host.equals("rutube.ru") || host.endsWith(".rutube.ru")
                     || host.equals("rtbcdn.ru") || host.endsWith(".rtbcdn.ru") || host.equals("rtbcdn.net") || host.endsWith(".rtbcdn.net");
             if (!allowedHost) return false;
             return !isDashManifest(url) || host.equals("rutube.ru") || host.endsWith(".rutube.ru")
                     || host.equals("rtbcdn.ru") || host.endsWith(".rtbcdn.ru") || host.equals("rtbcdn.net") || host.endsWith(".rtbcdn.net");
         } catch (Exception e) { return false; }
+    }
+
+    private static String describePlaybackError(PlaybackException error) {
+        StringBuilder detail = new StringBuilder(error == null ? "ошибка плеера" : error.getErrorCodeName());
+        Throwable cause = error;
+        while (cause != null) {
+            if (cause instanceof HttpDataSource.InvalidResponseCodeException) {
+                detail.append(" · HTTP ").append(((HttpDataSource.InvalidResponseCodeException) cause).responseCode);
+                break;
+            }
+            cause = cause.getCause();
+        }
+        return detail.toString();
     }
 
     private void handlePlaybackFailure(String reason) {
