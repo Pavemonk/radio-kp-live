@@ -956,6 +956,11 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             }
             return new ArrayList<>(urls);
         }
+        if (parsed instanceof JSONObject && ((JSONObject) parsed).has("payload")) {
+            // An al_video.php response without the canonical player params is
+            // an error/permission response, not a reason to scan arbitrary URLs.
+            return new ArrayList<>(urls);
+        }
         if (parsed != null) collectVkPlayerFormats(parsed, urls, false, 0);
         collectVkEmbeddedPlayerParams(body, urls);
         collectVkApiPrefetchHls(body, urls);
@@ -1527,11 +1532,13 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         if (host == null) return false;
         host = host.toLowerCase(Locale.ROOT);
         return host.endsWith(".okcdn.ru") || host.endsWith(".vkuservideo.net") || host.endsWith(".vkuservideo.com")
-                || host.endsWith(".vkuservideo.ru") || host.endsWith(".userapi.com") || host.endsWith(".vkuseraudio.net")
-                || host.endsWith(".vkuseraudio.ru") || host.endsWith(".vkuseraudio.com") || host.endsWith(".vkuserlive.net")
-                || host.endsWith(".vkuser.net") || host.endsWith(".cdn-vk.ru") || host.endsWith(".cdn-vk.com")
-                || host.endsWith(".mycdn.me") || host.equals("vkvideo.ru") || host.endsWith(".vkvideo.ru")
-                || host.equals("vk.com") || host.endsWith(".vk.com");
+                || host.endsWith(".vkuservideo.ru") || host.endsWith(".userapi.com") || host.endsWith(".userapi.ru")
+                || host.endsWith(".vkuseraudio.net") || host.endsWith(".vkuseraudio.ru") || host.endsWith(".vkuseraudio.com")
+                || host.endsWith(".vkuserlive.net") || host.endsWith(".vkuserlive.com") || host.endsWith(".vkuser.net")
+                || host.endsWith(".vkusercdn.ru") || host.endsWith(".cdn-vk.ru") || host.endsWith(".cdn-vk.net")
+                || host.endsWith(".cdn-vk.com") || host.endsWith(".vk-cdn.me") || host.endsWith(".vk-cdn.net")
+                || host.endsWith(".vkcache.com") || host.endsWith(".vkcdnservice.com") || host.endsWith(".mycdn.me")
+                || host.equals("vkvideo.ru") || host.endsWith(".vkvideo.ru") || host.equals("vk.com") || host.endsWith(".vk.com");
     }
 
     private static boolean isVkHost(String host) {
