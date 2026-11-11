@@ -424,7 +424,8 @@ public final class AudioPlaybackService extends Service {
                     if (target != null) target.onLiveProgramDateTime(timestamp);
                 });
             } catch (Exception error) {
-                postHlsDiagnostic(generation, playlistUrl, "ошибка чтения HLS: " + error.getClass().getSimpleName());
+                postHlsDiagnostic(generation, playlistUrl, "ошибка чтения HLS: "
+                        + error.getClass().getSimpleName() + " · " + error.getMessage());
             } finally {
                 if (connection != null) connection.disconnect();
             }
@@ -434,10 +435,14 @@ public final class AudioPlaybackService extends Service {
     }
 
     private void postHlsDiagnostic(int generation, String playlistUrl, String diagnostic) {
+        String host;
+        try { host = new URL(playlistUrl).getHost(); }
+        catch (Exception ignored) { host = "unknown-host"; }
+        final String safeDiagnostic = "host=" + host + " · " + diagnostic;
         handler.post(() -> {
             if (generation != streamGeneration) return;
             PlaybackStateListener target = listener;
-            if (target != null) target.onHlsDiagnostics(diagnostic);
+            if (target != null) target.onHlsDiagnostics(safeDiagnostic);
         });
     }
 
@@ -930,10 +935,15 @@ public final class AudioPlaybackService extends Service {
     private static String describePlaybackError(PlaybackException error) {
         StringBuilder detail = new StringBuilder(error == null ? "ошибка плеера" : error.getErrorCodeName());
         Throwable cause = error;
-        while (cause != null) {
+        int depth = 0;
+        while (cause != null && depth++ < 5) {
+            detail.append(" · ").append(cause.getClass().getSimpleName());
             if (cause instanceof HttpDataSource.InvalidResponseCodeException) {
-                detail.append(" · HTTP ").append(((HttpDataSource.InvalidResponseCodeException) cause).responseCode);
-                break;
+                detail.append(" HTTP ").append(((HttpDataSource.InvalidResponseCodeException) cause).responseCode);
+            }
+            String message = cause.getMessage();
+            if (message != null && !message.isEmpty()) {
+                detail.append(": ").append(message.length() > 220 ? message.substring(0, 220) : message);
             }
             cause = cause.getCause();
         }
