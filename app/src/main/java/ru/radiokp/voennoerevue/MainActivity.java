@@ -1783,7 +1783,18 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             Uri uri = Uri.parse(url);
             String host = uri.getHost();
             String path = uri.getPath() == null ? "" : uri.getPath();
-            return isVkPage(url) && path.replaceAll("/+$", "").equalsIgnoreCase("/@radiokp/lives");
+            String normalizedPath = path.replaceAll("/+$", "");
+            if (!isVkPage(url)) return false;
+
+            // vkvideo.ru currently redirects /@radiokp/lives to the mobile
+            // channel root /@radiokp. The channel page still contains video
+            // cards; scan those cards and let al_video.php's live=2 marker
+            // distinguish an actual live broadcast from archived videos.
+            if (normalizedPath.equalsIgnoreCase("/@radiokp/lives")) return true;
+            return normalizedPath.equalsIgnoreCase("/@radiokp")
+                    && host != null
+                    && (host.equalsIgnoreCase("m.vkvideo.ru")
+                        || host.equalsIgnoreCase("vkvideo.ru"));
         } catch (Exception ignored) { }
         return false;
     }
