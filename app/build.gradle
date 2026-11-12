@@ -10,8 +10,8 @@ android {
         applicationId 'ru.radiokp.voennoerevue.vkdebug'
         minSdk 23
         targetSdk 35
-        versionCode 31
-        versionName '0.7.24-debug'
+        versionCode 32
+        versionName '0.7.25-debug'
     }
 }
 
