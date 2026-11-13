@@ -2532,6 +2532,19 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         return childPlaylists;
     }
 
+    private static boolean isAudioOnlyCodecList(String codecs) {
+        if (codecs == null || codecs.trim().isEmpty()) return false;
+        String value = codecs.toLowerCase(Locale.ROOT);
+        boolean hasAudio = value.contains("mp4a") || value.contains("aac")
+                || value.contains("ac-3") || value.contains("ec-3")
+                || value.contains("opus") || value.contains("vorbis")
+                || value.contains("flac") || value.contains("alac");
+        boolean hasVideo = value.contains("avc") || value.contains("hev")
+                || value.contains("hvc") || value.contains("vp8")
+                || value.contains("vp9") || value.contains("av01");
+        return hasAudio && !hasVideo;
+    }
+
     private static Map<String, String> parseRutubeHlsAttributes(String line) {
         Map<String, String> attrs = new HashMap<>();
         int colon = line.indexOf(':');
