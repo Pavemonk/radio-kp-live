@@ -8,7 +8,7 @@
 
     <application
         android:allowBackup="false"
-        android:label="Радио КП — VK DEBUG 0.7.28"
+        android:label="Радио КП — RUTUBE DEBUG 0.7.29"
         android:usesCleartextTraffic="true"
         android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
