@@ -382,6 +382,9 @@ public final class AudioPlaybackService extends Service {
                     postHlsDiagnostic(generation, playlistUrl, "ответ не является HLS-плейлистом");
                     return;
                 }
+                // Research-only report: it does not alter the media URL or ExoPlayer selection.
+                postHlsDiagnostic(generation, playlistUrl, describeHlsPlaylistStructure(manifest));
+                probeHlsExternalAudioPlaylists(connection.getURL().toExternalForm(), manifest, generation);
                 java.util.regex.Matcher sequence = java.util.regex.Pattern
                         .compile("(?m)^#EXT-X-MEDIA-SEQUENCE:(\\d+)\\s*$").matcher(manifest);
                 String sequenceValue = sequence.find() ? sequence.group(1) : "не указан";
@@ -432,6 +435,128 @@ public final class AudioPlaybackService extends Service {
         }, "RadioKp-HlsPdtProbe");
         probe.setDaemon(true);
         probe.start();
+    }
+
+
+    private String describeHlsPlaylistStructure(String manifest) {
+        String[] lines = manifest.replace("\r", "").split("\n");
+        ArrayList<String> variants = new ArrayList<>();
+        ArrayList<String> audioRenditions = new ArrayList<>();
+        int segments = 0;
+        String targetDuration = null;
+        for (String raw : lines) {
+            String line = raw.trim();
+            if (line.startsWith("#EXT-X-STREAM-INF:")) {
+                Map<String, String> attrs = parseHlsAttributes(line);
+                String codecs = attrs.get("CODECS");
+                String variant = "bw=" + attrs.get("BANDWIDTH")
+                        + ",res=" + attrs.get("RESOLUTION")
+                        + ",codecs=" + (codecs == null ? "?" : codecs)
+                        + ",audioGroup=" + attrs.get("AUDIO")
+                        + ",audioOnly=" + isAudioOnlyCodecList(codecs);
+                variants.add(variant);
+            } else if (line.startsWith("#EXT-X-MEDIA:")) {
+                Map<String, String> attrs = parseHlsAttributes(line);
+                if ("AUDIO".equalsIgnoreCase(attrs.get("TYPE"))) {
+                    audioRenditions.add("group=" + attrs.get("GROUP-ID")
+                            + ",name=" + attrs.get("NAME")
+                            + ",default=" + attrs.get("DEFAULT")
+                            + ",autoselect=" + attrs.get("AUTOSELECT")
+                            + ",uri=" + (attrs.get("URI") == null ? "нет" : "есть"));
+                }
+            } else if (line.startsWith("#EXTINF:")) {
+                segments++;
+            } else if (line.startsWith("#EXT-X-TARGETDURATION:")) {
+                targetDuration = line.substring(line.indexOf(':') + 1).trim();
+            }
+        }
+        StringBuilder out = new StringBuilder();
+        if (!variants.isEmpty()) {
+            out.append("HLS_MASTER variants=").append(variants.size())
+                    .append(" audioRenditions=").append(audioRenditions.size());
+            for (int i = 0; i < variants.size() && i < 4; i++) out.append(" | variant").append(i + 1).append('{').append(variants.get(i)).append('}');
+            for (int i = 0; i < audioRenditions.size() && i < 4; i++) out.append(" | audio").append(i + 1).append('{').append(audioRenditions.get(i)).append('}');
+            if (variants.size() > 4 || audioRenditions.size() > 4) out.append(" | listsTruncated");
+        } else {
+            out.append("HLS_MEDIA segments=").append(segments)
+                    .append(" targetDuration=").append(targetDuration == null ? "?" : targetDuration)
+                    .append(" · в этом URL нет master-таблицы вариантов и внешних аудиодорожек");
+        }
+        return out.toString();
+    }
+
+    private void probeHlsExternalAudioPlaylists(String masterUrl, String manifest, int generation) {
+        if (manifest == null || !manifest.contains("#EXT-X-STREAM-INF:")) return;
+        String[] lines = manifest.replace("\r", "").split("\n");
+        int checked = 0;
+        for (String raw : lines) {
+            String line = raw.trim();
+            if (!line.startsWith("#EXT-X-MEDIA:") || checked >= 2) continue;
+            Map<String, String> attrs = parseHlsAttributes(line);
+            if (!"AUDIO".equalsIgnoreCase(attrs.get("TYPE"))) continue;
+            String rawUri = attrs.get("URI");
+            if (rawUri == null || rawUri.trim().isEmpty()) {
+                postHlsDiagnostic(generation, masterUrl, "HLS_AUDIO_TRACK group=" + attrs.get("GROUP-ID")
+                        + " name=" + attrs.get("NAME") + " · URI отсутствует");
+                continue;
+            }
+            String audioUrl = resolveSafePlaylistUri(masterUrl, rawUri);
+            if (audioUrl == null) {
+                postHlsDiagnostic(generation, masterUrl, "HLS_AUDIO_TRACK group=" + attrs.get("GROUP-ID")
+                        + " · URI найден, но адрес не прошёл проверку домена/формата");
+                continue;
+            }
+            checked++;
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) new URL(audioUrl).openConnection();
+                connection.setInstanceFollowRedirects(true);
+                connection.setConnectTimeout(5000);
+                connection.setReadTimeout(5000);
+                connection.setRequestMethod("GET");
+                for (Map.Entry<String, String> header : createStreamHeaders().entrySet()) {
+                    connection.setRequestProperty(header.getKey(), header.getValue());
+                }
+                connection.setRequestProperty("User-Agent", USER_AGENT);
+                connection.setRequestProperty("Range", "bytes=0-65535");
+                int code = connection.getResponseCode();
+                if (code < 200 || code >= 300) {
+                    postHlsDiagnostic(generation, audioUrl, "HLS_AUDIO_TRACK group=" + attrs.get("GROUP-ID")
+                            + " name=" + attrs.get("NAME") + " · HTTP " + code);
+                    continue;
+                }
+                ByteArrayOutputStream output = new ByteArrayOutputStream();
+                try (InputStream input = connection.getInputStream()) {
+                    byte[] buffer = new byte[2048];
+                    int total = 0, count;
+                    while ((count = input.read(buffer)) != -1 && total < 65536) {
+                        int accepted = Math.min(count, 65536 - total);
+                        output.write(buffer, 0, accepted);
+                        total += accepted;
+                        if (accepted < count) break;
+                    }
+                }
+                String child = output.toString(StandardCharsets.UTF_8.name());
+                int childSegments = 0;
+                for (String childLine : child.replace("\r", "").split("\n")) {
+                    if (childLine.trim().startsWith("#EXTINF:")) childSegments++;
+                }
+                boolean media = child.trim().startsWith("#EXTM3U") && child.contains("#EXTINF:");
+                boolean nestedMaster = child.contains("#EXT-X-STREAM-INF:");
+                postHlsDiagnostic(generation, audioUrl, "HLS_AUDIO_TRACK group=" + attrs.get("GROUP-ID")
+                        + " name=" + attrs.get("NAME") + " default=" + attrs.get("DEFAULT")
+                        + " · HTTP=" + code + " · playlist=" + (media ? "media" : (nestedMaster ? "nested-master" : "unknown"))
+                        + " · segments=" + childSegments + " · contentType=" + connection.getContentType());
+            } catch (Exception error) {
+                postHlsDiagnostic(generation, audioUrl, "HLS_AUDIO_TRACK group=" + attrs.get("GROUP-ID")
+                        + " · " + error.getClass().getSimpleName() + " · " + error.getMessage());
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        }
+        if (checked == 0 && !manifest.contains("#EXT-X-MEDIA:TYPE=AUDIO")) {
+            postHlsDiagnostic(generation, masterUrl, "HLS_AUDIO_TRACK: внешних AUDIO URI в master playlist не найдено");
+        }
     }
 
     private void postHlsDiagnostic(int generation, String playlistUrl, String diagnostic) {
