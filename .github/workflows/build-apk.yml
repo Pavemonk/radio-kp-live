@@ -3,6 +3,7 @@ name: Build Android APK
 # Build known-good VK resolver rollback 0.7.17
 # Build verification for VK scanner recovery 0.7.16
 # Diagnostic-only VK HLS/DASH research build 0.7.27
+# RuTube HLS/DASH audio format diagnostics 0.7.29
 
 on:
   push:
