@@ -777,6 +777,11 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                         + " · bytes=" + bytes.length + " · cookie=" + (cookie == null || cookie.isEmpty() ? "absent" : "present")
                         + " · selected=" + selectedSourceMetadata + " · json=" + debugJsonShape(body));
                 debugLog("RUTUBE_JSON_FIELDS", summarizeRutubeJsonFields(body));
+                if (selectedRutubeMetadata) {
+                    logRutubeApiDetails(body, cookie,
+                            findHeaderIgnoreCase(originalHeaders, "User-Agent"),
+                            findHeaderIgnoreCase(originalHeaders, "Referer"));
+                }
                 debugLog("RUTUBE_FORMAT_URLS", "liveHLS=" + debugCandidateHosts(resolved)
                         + " · allHLS=" + debugCandidateHosts(diagnosticHls)
                         + " · liveDASH=" + debugCandidateHosts(dashResolved)
@@ -888,7 +893,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private static final String INSTALL_RUTUBE_HOOK_SCRIPT = "(function(){try{if(window.__radioKpRutubeHook)return;window.__radioKpRutubeHook=true;" +
             "function hideVideo(){try{document.querySelectorAll('video').forEach(function(v){v.style.setProperty('position','fixed','important');v.style.setProperty('left','-5px','important');v.style.setProperty('top','-5px','important');v.style.setProperty('width','1px','important');v.style.setProperty('height','1px','important');v.style.setProperty('opacity','0.001','important');v.style.setProperty('pointer-events','none','important');v.controls=false;v.muted=true;try{v.pause();v.removeAttribute('autoplay')}catch(e){}})}catch(e){}}" +
             "hideVideo();try{new MutationObserver(hideVideo).observe(document.documentElement,{childList:true,subtree:true})}catch(e){}" +
-            "function report(t){try{if(typeof t==='string'&&(t.indexOf('video_balancer')!==-1||t.indexOf('live_streams')!==-1||t.indexOf('is_live')!==-1||t.indexOf('is_livestream')!==-1||t.indexOf('.m3u8')!==-1||t.indexOf('.mpd')!==-1)&&window.AudioBridge)window.AudioBridge.onPossibleStreamText(t)}catch(e){}}" +
+            "function report(t){try{if(typeof t==='string'){var l=t.toLowerCase();if((l.indexOf('video_balancer')!==-1||l.indexOf('live_streams')!==-1||l.indexOf('audiotracks')!==-1||l.indexOf('audio_url')!==-1||l.indexOf('audio_track')!==-1||l.indexOf('effective_video')!==-1||l.indexOf('stream_type')!==-1||l.indexOf('is_live')!==-1||l.indexOf('is_livestream')!==-1||l.indexOf('.m3u8')!==-1||l.indexOf('.mpd')!==-1||l.indexOf('.m4a')!==-1||l.indexOf('.aac')!==-1||l.indexOf('.mp3')!==-1)&&window.AudioBridge)window.AudioBridge.onPossibleStreamText(t)}}catch(e){}}" +
             "var f=window.fetch;if(f)window.fetch=function(){return f.apply(this,arguments).then(function(r){try{r.clone().text().then(report)}catch(e){}return r})};" +
             "var op=XMLHttpRequest.prototype.open,se=XMLHttpRequest.prototype.send;" +
             "XMLHttpRequest.prototype.open=function(m,u){this.__radioKpUrl=String(u||'');return op.apply(this,arguments)};" +
@@ -1116,6 +1121,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                         + " · allHLS=" + debugCandidateHosts(diagnosticHls)
                         + " · allDASH=" + debugCandidateHosts(diagnosticDash));
                 debugLog("RUTUBE_JSON_FIELDS", summarizeRutubeJsonFields(body));
+                logRutubeApiDetails(body, CookieManager.getInstance().getCookie("https://rutube.ru/"),
+                        VK_PROBE_USER_AGENT, currentPageUrl);
                 String cookie = CookieManager.getInstance().getCookie("https://rutube.ru/");
                 probeRutubeHlsManifests(diagnosticHls, cookie, VK_PROBE_USER_AGENT, currentPageUrl);
                 probeRutubeDashManifests(diagnosticDash, cookie, VK_PROBE_USER_AGENT, currentPageUrl);
@@ -2239,8 +2246,20 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         try {
             Uri uri = Uri.parse(raw);
             String host = uri.getHost() == null ? "?" : uri.getHost();
-            String path = uri.getPath() == null ? "/" : uri.getPath();
-            return uri.getScheme() + "://" + host + path + (uri.getEncodedQuery() == null ? "" : " [query скрыт]");
+            String rawPath = uri.getPath() == null ? "/" : uri.getPath();
+            StringBuilder safePath = new StringBuilder();
+            String[] parts = rawPath.split("/", -1);
+            for (String part : parts) {
+                safePath.append('/');
+                if (part.matches("(?i)[a-z0-9_-]{18,}") || part.matches("(?i)[a-f0-9]{16,}")) {
+                    safePath.append("[сегмент скрыт]");
+                } else {
+                    safePath.append(part);
+                }
+            }
+            String shownPath = safePath.length() == 0 ? "/" : safePath.toString();
+            return uri.getScheme() + "://" + host + shownPath
+                    + (uri.getEncodedQuery() == null ? "" : " [query скрыт]");
         } catch (Exception ignored) {
             return "(URL не разобран)";
         }
@@ -2395,6 +2414,144 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             return "string(" + text.length() + ")";
         }
         return String.valueOf(value);
+    }
+
+    private static String summarizeRutubeApiDetails(String body) {
+        Object parsed = parseJsonBody(body);
+        if (parsed == null) return "JSON не разобран";
+        StringBuilder out = new StringBuilder();
+        if (parsed instanceof JSONObject) {
+            JSONObject root = (JSONObject) parsed;
+            for (String key : new String[]{"stream_type", "effective_video", "has_video", "audiotracks",
+                    "live_streams", "video_balancer", "alternative_video_id"}) {
+                if (root.has(key)) {
+                    if (out.length() > 0) out.append(" · ");
+                    out.append("$.").append(key).append("=")
+                            .append(describeRutubeDetailedValue(key, root.opt(key)));
+                }
+            }
+        }
+        int[] count = {0};
+        collectRutubeApiHints(parsed, "$", 0, out, count);
+        return out.length() == 0 ? "значимые поля не обнаружены" : out.toString();
+    }
+
+    private static String describeRutubeDetailedValue(String key, Object value) {
+        if (value == null || value == JSONObject.NULL) return "null";
+        if (value instanceof Boolean || value instanceof Number) return String.valueOf(value);
+        if (value instanceof JSONObject) return "object{" + limitedJsonKeys((JSONObject) value, 16) + "}";
+        if (value instanceof JSONArray) {
+            JSONArray array = (JSONArray) value;
+            String detail = "array[" + array.length() + "]";
+            JSONObject first = array.optJSONObject(0);
+            if (first != null) detail += " first{" + limitedJsonKeys(first, 12) + "}";
+            return detail;
+        }
+        if (value instanceof String) {
+            String text = ((String) value).trim();
+            if (text.startsWith("https://") || text.startsWith("http://") || text.startsWith("//")) {
+                return debugSafeUrl(text.startsWith("//") ? "https:" + text : text);
+            }
+            String lower = key == null ? "" : key.toLowerCase(Locale.ROOT);
+            if (lower.equals("stream_type") || lower.matches(".*(mime|codec|format|quality|protocol|container|extension|kind|content_type).*")) {
+                if (text.length() <= 64 && text.matches("[a-zA-Z0-9_./:+ -]*")) return "\"" + text + "\"";
+            }
+            if (lower.matches(".*(id|token|signature|auth|key).*")) return "string(" + text.length() + ")";
+            return "string(" + text.length() + ")";
+        }
+        return value.getClass().getSimpleName();
+    }
+
+    private static void collectRutubeApiHints(Object node, String path, int depth,
+                                               StringBuilder out, int[] count) {
+        if (node == null || depth > 10 || count[0] >= 55) return;
+        if (node instanceof JSONObject) {
+            JSONObject object = (JSONObject) node;
+            JSONArray names = object.names();
+            if (names == null) return;
+            for (int i = 0; i < names.length() && count[0] < 55; i++) {
+                String key = names.optString(i);
+                Object value = object.opt(key);
+                String childPath = path + "." + key;
+                String lower = key.toLowerCase(Locale.ROOT);
+                if (value instanceof String) {
+                    String text = ((String) value).trim();
+                    boolean url = text.startsWith("https://") || text.startsWith("http://") || text.startsWith("//");
+                    boolean relevant = lower.matches(".*(audio|track|stream|source|file|url|src|media|mime|format|codec|quality|balancer|video|effective|protocol|type|bitrate|extension|container).*");
+                    if (url || relevant) {
+                        if (out.length() > 0) out.append(" · ");
+                        out.append(childPath).append("=");
+                        out.append(describeRutubeDetailedValue(key, value));
+                        count[0]++;
+                    }
+                } else if (value == null || value == JSONObject.NULL || value instanceof Boolean || value instanceof Number) {
+                    if (lower.matches(".*(audio|track|stream|source|file|url|src|media|mime|format|codec|quality|balancer|video|effective|protocol|type|bitrate|extension|container|live).*")) {
+                        if (out.length() > 0) out.append(" · ");
+                        out.append(childPath).append("=").append(describeRutubeDetailedValue(key, value));
+                        count[0]++;
+                    }
+                }
+                if (value instanceof JSONObject || value instanceof JSONArray) {
+                    collectRutubeApiHints(value, childPath, depth + 1, out, count);
+                }
+            }
+        } else if (node instanceof JSONArray) {
+            JSONArray array = (JSONArray) node;
+            for (int i = 0; i < array.length() && i < 24 && count[0] < 55; i++) {
+                Object value = array.opt(i);
+                if (value instanceof JSONObject || value instanceof JSONArray) {
+                    collectRutubeApiHints(value, path + "[" + i + "]", depth + 1, out, count);
+                }
+            }
+        }
+    }
+
+    private static ArrayList<String> extractRutubeAudioUrlHints(String body) {
+        LinkedHashSet<String> urls = new LinkedHashSet<>();
+        collectRutubeAudioUrlHints(parseJsonBody(body), "$", false, 0, urls);
+        return new ArrayList<>(urls);
+    }
+
+    private static void collectRutubeAudioUrlHints(Object node, String path, boolean audioContext,
+                                                    int depth, LinkedHashSet<String> urls) {
+        if (node == null || depth > 10 || urls.size() >= 8) return;
+        if (node instanceof JSONObject) {
+            JSONObject object = (JSONObject) node;
+            boolean hasAudioFlag = object.optBoolean("is_audio", false) || object.optBoolean("audio_only", false);
+            boolean nextAudioContext = audioContext || hasAudioFlag || path.toLowerCase(Locale.ROOT).matches(".*(audio|track|sound).*");
+            JSONArray names = object.names();
+            if (names == null) return;
+            for (int i = 0; i < names.length() && urls.size() < 8; i++) {
+                String key = names.optString(i);
+                Object value = object.opt(key);
+                String childPath = path + "." + key;
+                String lower = key.toLowerCase(Locale.ROOT);
+                if (value instanceof String) {
+                    String text = ((String) value).trim();
+                    boolean url = text.startsWith("https://") || text.startsWith("http://") || text.startsWith("//");
+                    boolean audioKey = lower.matches(".*(audio|track|sound|url|src|file|source|media|stream).*");
+                    boolean audioExtension = text.toLowerCase(Locale.ROOT).matches(".*\\.(m4a|aac|mp3|oga|ogg|opus|flac)(\\?.*)?$");
+                    if (url && (nextAudioContext || audioKey || audioExtension)) {
+                        urls.add(text.startsWith("//") ? "https:" + text : text);
+                    }
+                } else if (value instanceof JSONObject || value instanceof JSONArray) {
+                    collectRutubeAudioUrlHints(value, childPath, nextAudioContext, depth + 1, urls);
+                }
+            }
+        } else if (node instanceof JSONArray) {
+            JSONArray array = (JSONArray) node;
+            for (int i = 0; i < array.length() && i < 24 && urls.size() < 8; i++) {
+                collectRutubeAudioUrlHints(array.opt(i), path + "[" + i + "]", audioContext, depth + 1, urls);
+            }
+        }
+    }
+
+    private void logRutubeApiDetails(String body, String cookie, String userAgent, String referer) {
+        debugLog("RUTUBE_API_DETAIL", summarizeRutubeApiDetails(body));
+        ArrayList<String> audioHints = extractRutubeAudioUrlHints(body);
+        debugLog("RUTUBE_AUDIO_URL_HINTS", audioHints.isEmpty()
+                ? "URL в аудио-полях не обнаружены"
+                : "найдено=" + audioHints.size() + " · " + debugCandidateHosts(audioHints));
     }
 
     private void probeRutubeHlsManifests(ArrayList<String> candidates, String cookie,
