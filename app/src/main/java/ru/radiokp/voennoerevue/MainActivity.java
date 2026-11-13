@@ -1862,12 +1862,6 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         return matcher.find() ? matcher.group(1) : null;
     }
 
-    private static String xmlAttributeValue(String attributes, String name) {
-        if (attributes == null) return null;
-        Matcher matcher = Pattern.compile("(?i)\\b" + Pattern.quote(name) + "\\s*=\\s*['\\\"]([^'\\\"]+)['\\\"]").matcher(attributes);
-        return matcher.find() ? matcher.group(1) : null;
-    }
-
     private static boolean isAllowedRutubeHls(String url) {
         if (url == null || !url.startsWith("https://") || !url.toLowerCase(Locale.ROOT).contains(".m3u8")) return false;
         String host = Uri.parse(url).getHost();
