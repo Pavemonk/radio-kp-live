@@ -6,7 +6,7 @@ name: Build Android APK
 
 on:
   push:
-    branches: [main, live-broadcast-duration-0.7.7, live-broadcast-duration-0.7.8, live-broadcast-progress-0.7.9, live-progress-visible-clock-0.7.10, hls-program-date-time-0.7.11, rutube-live-diagnostics-0.7.12, persistent-api-hls-diagnostics-0.7.13, hls-diagnostic-callback-fix-0.7.14, vk-live-only-selection-0.7.15, vk-live-scanner-recovery-0.7.16, vk-resolver-rollback-0.7.17, vk-live-state-filter-0.7.18, vk-live-recording-state-fix-0.7.19, vk-al-video-playerparams-probe-0.7.20, vk-native-al-video-endpoint-0.7.21, vk-full-channel-scan-and-discover-0.7.23, vk-debug-instrumentation-0.7.24, vk-debug-fix-0.7.25, vk-debug-settings-0.7.26, vk-audio-research-0.7.27, vk-dash-audio-0.7.28]
+    branches: [main, live-broadcast-duration-0.7.7, live-broadcast-duration-0.7.8, live-broadcast-progress-0.7.9, live-progress-visible-clock-0.7.10, hls-program-date-time-0.7.11, rutube-live-diagnostics-0.7.12, persistent-api-hls-diagnostics-0.7.13, hls-diagnostic-callback-fix-0.7.14, vk-live-only-selection-0.7.15, vk-live-scanner-recovery-0.7.16, vk-resolver-rollback-0.7.17, vk-live-state-filter-0.7.18, vk-live-recording-state-fix-0.7.19, vk-al-video-playerparams-probe-0.7.20, vk-native-al-video-endpoint-0.7.21, vk-full-channel-scan-and-discover-0.7.23, vk-debug-instrumentation-0.7.24, vk-debug-fix-0.7.25, vk-debug-settings-0.7.26, vk-audio-research-0.7.27, vk-dash-audio-0.7.28, rutube-audio-diagnostics-0.7.29]
   workflow_dispatch:
 
 permissions:
@@ -43,7 +43,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: radio-kp-vk-debug-0.7.27
+          name: radio-kp-rutube-debug-0.7.29
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
