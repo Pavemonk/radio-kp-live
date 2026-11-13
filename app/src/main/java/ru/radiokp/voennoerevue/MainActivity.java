@@ -113,6 +113,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private volatile String vkSelectedVideoUrl = "";
     private volatile boolean vkProbeRunning = false;
     private final LinkedHashSet<String> vkDashProbeSeen = new LinkedHashSet<>();
+    private final LinkedHashSet<String> rutubeHlsProbeSeen = new LinkedHashSet<>();
     // True only after the VK feed scanner selected a card with an explicit LIVE badge.
     private volatile boolean vkLiveCardSelected = false;
     private volatile boolean streamStarted = false;
@@ -284,7 +285,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         vkDebugPanel = new LinearLayout(this);
         vkDebugPanel.setOrientation(LinearLayout.VERTICAL);
 
-        TextView debugHeading = text("ЖУРНАЛ ОТЛАДКИ VK", 12, Color.rgb(255, 125, 80), true);
+        TextView debugHeading = text("ЖУРНАЛ ДИАГНОСТИКИ", 12, Color.rgb(255, 125, 80), true);
         LinearLayout.LayoutParams debugHeadingLp = new LinearLayout.LayoutParams(-1, -2);
         debugHeadingLp.topMargin = dp(10);
         debugHeadingLp.bottomMargin = dp(6);
@@ -421,6 +422,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private void startSource(int source, boolean automatic) {
         if (source < SOURCE_VK || source > SOURCE_RADIO) return;
         debugLog("SOURCE", "start · source=" + SOURCE_NAMES[source] + " · automatic=" + automatic + " · nextAttempt=" + (attemptId + 1));
+        if (source == SOURCE_RUTUBE) {
+            synchronized (rutubeHlsProbeSeen) { rutubeHlsProbeSeen.clear(); }
+        }
         cancelSourceTimeout();
         attemptId++;
         if (!automatic) attemptedSourcesMask = 0;
@@ -765,6 +769,27 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                     ? extractRutubeLiveDashUrls(body)
                     : (source == SOURCE_VK && selectedSourceMetadata && !resolved.isEmpty()
                         ? extractVkDashUrls(body) : new ArrayList<>());
+            if (source == SOURCE_RUTUBE) {
+                ArrayList<String> diagnosticHls = extractRutubeDiagnosticHlsUrls(body);
+                ArrayList<String> diagnosticDash = extractRutubeDiagnosticDashUrls(body);
+                debugLog("RUTUBE_API", "endpoint=" + (url.contains("/api/video/") ? "video API" : "play/options or feed")
+                        + " · HTTP=" + code + " · type=" + safeShort(connection.getContentType(), 80)
+                        + " · bytes=" + bytes.length + " · cookie=" + (cookie == null || cookie.isEmpty() ? "absent" : "present")
+                        + " · selected=" + selectedSourceMetadata + " · json=" + debugJsonShape(body));
+                debugLog("RUTUBE_JSON_FIELDS", summarizeRutubeJsonFields(body));
+                debugLog("RUTUBE_FORMAT_URLS", "liveHLS=" + debugCandidateHosts(resolved)
+                        + " · allHLS=" + debugCandidateHosts(diagnosticHls)
+                        + " · liveDASH=" + debugCandidateHosts(dashResolved)
+                        + " · allDASH=" + debugCandidateHosts(diagnosticDash));
+                if (selectedSourceMetadata) {
+                    probeRutubeHlsManifests(diagnosticHls, cookie,
+                            findHeaderIgnoreCase(originalHeaders, "User-Agent"),
+                            findHeaderIgnoreCase(originalHeaders, "Referer"));
+                    probeRutubeDashManifests(diagnosticDash, cookie,
+                            findHeaderIgnoreCase(originalHeaders, "User-Agent"),
+                            findHeaderIgnoreCase(originalHeaders, "Referer"));
+                }
+            }
             if (source == SOURCE_VK) {
                 debugLog("VK_PARSE", "selected=" + selectedSourceMetadata + " · HLS=" + resolved.size()
                         + " · HLS hosts=" + debugCandidateHosts(resolved)
@@ -863,7 +888,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private static final String INSTALL_RUTUBE_HOOK_SCRIPT = "(function(){try{if(window.__radioKpRutubeHook)return;window.__radioKpRutubeHook=true;" +
             "function hideVideo(){try{document.querySelectorAll('video').forEach(function(v){v.style.setProperty('position','fixed','important');v.style.setProperty('left','-5px','important');v.style.setProperty('top','-5px','important');v.style.setProperty('width','1px','important');v.style.setProperty('height','1px','important');v.style.setProperty('opacity','0.001','important');v.style.setProperty('pointer-events','none','important');v.controls=false;v.muted=true;try{v.pause();v.removeAttribute('autoplay')}catch(e){}})}catch(e){}}" +
             "hideVideo();try{new MutationObserver(hideVideo).observe(document.documentElement,{childList:true,subtree:true})}catch(e){}" +
-            "function report(t){try{if(typeof t==='string'&&(t.indexOf('video_balancer')!==-1||t.indexOf('live_streams')!==-1||t.indexOf('is_live')!==-1||t.indexOf('is_livestream')!==-1)&&window.AudioBridge)window.AudioBridge.onPossibleStreamText(t)}catch(e){}}" +
+            "function report(t){try{if(typeof t==='string'&&(t.indexOf('video_balancer')!==-1||t.indexOf('live_streams')!==-1||t.indexOf('is_live')!==-1||t.indexOf('is_livestream')!==-1||t.indexOf('.m3u8')!==-1||t.indexOf('.mpd')!==-1)&&window.AudioBridge)window.AudioBridge.onPossibleStreamText(t)}catch(e){}}" +
             "var f=window.fetch;if(f)window.fetch=function(){return f.apply(this,arguments).then(function(r){try{r.clone().text().then(report)}catch(e){}return r})};" +
             "var op=XMLHttpRequest.prototype.open,se=XMLHttpRequest.prototype.send;" +
             "XMLHttpRequest.prototype.open=function(m,u){this.__radioKpUrl=String(u||'');return op.apply(this,arguments)};" +
@@ -1082,6 +1107,18 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 debugLog("VK_DASH_FOUND", "candidateCount=" + vkDashResearch.size()
                         + " · hosts=" + debugCandidateHosts(vkDashResearch));
                 probeVkDashManifests(vkDashResearch);
+            } else if (source == SOURCE_RUTUBE) {
+                ArrayList<String> diagnosticHls = extractRutubeDiagnosticHlsUrls(body);
+                ArrayList<String> diagnosticDash = extractRutubeDiagnosticDashUrls(body);
+                debugLog("RUTUBE_PLAYER_TEXT", "chars=" + body.length()
+                        + " · json=" + debugJsonShape(body)
+                        + " · liveHLS=" + streams.size()
+                        + " · allHLS=" + debugCandidateHosts(diagnosticHls)
+                        + " · allDASH=" + debugCandidateHosts(diagnosticDash));
+                debugLog("RUTUBE_JSON_FIELDS", summarizeRutubeJsonFields(body));
+                String cookie = CookieManager.getInstance().getCookie("https://rutube.ru/");
+                probeRutubeHlsManifests(diagnosticHls, cookie, VK_PROBE_USER_AGENT, currentPageUrl);
+                probeRutubeDashManifests(diagnosticDash, cookie, VK_PROBE_USER_AGENT, currentPageUrl);
             }
             ArrayList<String> dashStreams = source == SOURCE_RUTUBE
                     ? extractRutubeLiveDashUrls(body)
@@ -2042,7 +2079,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         panel.addView(diagnosticsTitle, diagnosticsTitleLp);
 
         CheckBox vkDebugBox = new CheckBox(this);
-        vkDebugBox.setText("Включить журнал отладки VK");
+        vkDebugBox.setText("Включить подробный журнал диагностики (VK/RuTube)");
         vkDebugBox.setTextColor(Color.WHITE);
         vkDebugBox.setChecked(vkDebugEnabled);
         panel.addView(vkDebugBox);
@@ -2087,7 +2124,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                         if (vkDebugText != null) vkDebugText.setText("Журнал отключён.");
                     } else if (!wasVkDebugEnabled) {
                         synchronized (vkDebugLog) { vkDebugLog.setLength(0); }
-                        debugLog("DIAGNOSTICS", "Журнал VK включён пользователем");
+                        debugLog("DIAGNOSTICS", "Журнал диагностики включён пользователем");
                     }
                     if (vkDebugPanel != null) vkDebugPanel.setVisibility(vkDebugEnabled ? View.VISIBLE : View.GONE);
                     applyQualityToActivePlayer();
@@ -2185,7 +2222,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         }
         ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
         if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Radio KP VK debug log", contents));
-        Toast.makeText(this, "DEBUG-лог скопирован. Вставь его сюда целиком.", Toast.LENGTH_LONG).show();
+        Toast.makeText(this, "Журнал диагностики скопирован. Вставь его сюда целиком.", Toast.LENGTH_LONG).show();
     }
 
     private static String safeShort(String value, int maxChars) {
@@ -2280,6 +2317,333 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private static String formatDateTime(long timestampMs) {
         return new java.text.SimpleDateFormat("dd.MM HH:mm:ss", Locale.ROOT)
                 .format(new java.util.Date(timestampMs));
+    }
+
+
+    private static ArrayList<String> extractRutubeDiagnosticHlsUrls(String body) {
+        LinkedHashSet<String> urls = new LinkedHashSet<>();
+        if (body == null || body.isEmpty()) return new ArrayList<>(urls);
+        Object parsed = parseJsonBody(body);
+        if (parsed != null) collectM3u8Urls(parsed, SOURCE_RUTUBE, urls);
+        Matcher matcher = Pattern.compile("https?://[^\\s\\\"'<>]+?\\.m3u8(?:\\?[^\\s\\\"'<>]*)?", Pattern.CASE_INSENSITIVE).matcher(body);
+        while (matcher.find() && urls.size() < MAX_HLS_CANDIDATES) {
+            addHlsCandidate(matcher.group(), SOURCE_RUTUBE, urls);
+        }
+        return new ArrayList<>(urls);
+    }
+
+    private static ArrayList<String> extractRutubeDiagnosticDashUrls(String body) {
+        LinkedHashSet<String> urls = new LinkedHashSet<>();
+        if (body == null || body.isEmpty()) return new ArrayList<>(urls);
+        Object parsed = parseJsonBody(body);
+        if (parsed != null) collectMpdUrls(parsed, urls);
+        Matcher matcher = Pattern.compile("https?://[^\\s\\\"'<>]+?\\.mpd(?:\\?[^\\s\\\"'<>]*)?", Pattern.CASE_INSENSITIVE).matcher(body);
+        while (matcher.find() && urls.size() < MAX_DASH_CANDIDATES) {
+            addDashCandidate(matcher.group(), urls);
+        }
+        return new ArrayList<>(urls);
+    }
+
+    private static String summarizeRutubeJsonFields(String body) {
+        Object parsed = parseJsonBody(body);
+        if (parsed == null) return "JSON не разобран; " + debugJsonShape(body);
+        StringBuilder out = new StringBuilder();
+        int[] budget = {0};
+        collectRutubeJsonFields(parsed, "$", 0, out, budget);
+        return out.length() == 0 ? "ключи потоков не найдены; root=" + debugJsonShape(body) : out.toString();
+    }
+
+    private static void collectRutubeJsonFields(Object node, String path, int depth,
+                                                  StringBuilder out, int[] budget) {
+        if (node == null || depth > 8 || budget[0] >= 36) return;
+        if (node instanceof JSONObject) {
+            JSONObject object = (JSONObject) node;
+            JSONArray names = object.names();
+            if (names == null) return;
+            for (int i = 0; i < names.length() && budget[0] < 36; i++) {
+                String key = names.optString(i);
+                Object value = object.opt(key);
+                String childPath = path + "." + key;
+                String lower = key.toLowerCase(Locale.ROOT);
+                if (lower.matches(".*(live_streams?|hls|dash|mpd|manifest|video_balancer|video|url|src|stream|format|quality|audio|codec|playlist|bitrate|adaptive|source).*")) {
+                    if (out.length() > 0) out.append(" · ");
+                    out.append(childPath).append("=").append(describeRutubeJsonValue(value));
+                    budget[0]++;
+                }
+                if (value instanceof JSONObject || value instanceof JSONArray) {
+                    collectRutubeJsonFields(value, childPath, depth + 1, out, budget);
+                }
+            }
+        } else if (node instanceof JSONArray) {
+            JSONArray array = (JSONArray) node;
+            for (int i = 0; i < array.length() && i < 12 && budget[0] < 36; i++) {
+                Object value = array.opt(i);
+                if (value instanceof JSONObject || value instanceof JSONArray) {
+                    collectRutubeJsonFields(value, path + "[" + i + "]", depth + 1, out, budget);
+                }
+            }
+        }
+    }
+
+    private static String describeRutubeJsonValue(Object value) {
+        if (value == null || value == JSONObject.NULL) return "null";
+        if (value instanceof JSONObject) return "object{" + limitedJsonKeys((JSONObject) value, 10) + "}";
+        if (value instanceof JSONArray) return "array[" + ((JSONArray) value).length() + "]";
+        if (value instanceof String) {
+            String text = (String) value;
+            if (text.contains(".m3u8") || text.contains(".mpd")) return debugSafeUrl(text);
+            return "string(" + text.length() + ")";
+        }
+        return String.valueOf(value);
+    }
+
+    private void probeRutubeHlsManifests(ArrayList<String> candidates, String cookie,
+                                          String userAgent, String referer) {
+        if (candidates == null || candidates.isEmpty()) return;
+        ArrayList<String> queue = new ArrayList<>();
+        synchronized (rutubeHlsProbeSeen) {
+            for (String candidate : candidates) {
+                if (queue.size() >= MAX_HLS_CANDIDATES) break;
+                if (isAllowedRutubeHls(candidate) && rutubeHlsProbeSeen.size() < 40
+                        && rutubeHlsProbeSeen.add(candidate)) queue.add(candidate);
+            }
+        }
+        if (queue.isEmpty()) return;
+        String actualAgent = userAgent == null || userAgent.isEmpty() ? VK_PROBE_USER_AGENT : userAgent;
+        String actualReferer = referer == null || referer.isEmpty() ? "https://rutube.ru/" : referer;
+        Thread worker = new Thread(() -> {
+            int index = 0;
+            while (index < queue.size() && index < 16) {
+                String manifestUrl = queue.get(index++);
+                ArrayList<String> children = inspectRutubeHlsManifest(manifestUrl, cookie, actualAgent, actualReferer);
+                for (String child : children) {
+                    if (queue.size() >= 16) break;
+                    synchronized (rutubeHlsProbeSeen) {
+                        if (rutubeHlsProbeSeen.size() < 40 && rutubeHlsProbeSeen.add(child)) queue.add(child);
+                    }
+                }
+            }
+            debugLog("RUTUBE_HLS_SCAN_END", "проверено плейлистов=" + index + " · очередь=" + queue.size());
+        }, "RadioKp-RutubeHlsProbe");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private ArrayList<String> inspectRutubeHlsManifest(String manifestUrl, String cookie,
+                                                        String userAgent, String referer) {
+        ArrayList<String> childPlaylists = new ArrayList<>();
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(manifestUrl).openConnection();
+            connection.setInstanceFollowRedirects(true);
+            connection.setConnectTimeout(7000);
+            connection.setReadTimeout(7000);
+            connection.setRequestMethod("GET");
+            connection.setRequestProperty("User-Agent", userAgent);
+            connection.setRequestProperty("Referer", referer);
+            connection.setRequestProperty("Origin", "https://rutube.ru");
+            connection.setRequestProperty("Accept", "application/vnd.apple.mpegurl,application/x-mpegURL,*/*");
+            connection.setRequestProperty("Accept-Encoding", "identity");
+            connection.setRequestProperty("Range", "bytes=0-262143");
+            if (cookie != null && !cookie.isEmpty()) connection.setRequestProperty("Cookie", cookie);
+            int code = connection.getResponseCode();
+            if (code < 200 || code >= 300) {
+                debugLog("RUTUBE_HLS_PROBE", debugSafeUrl(manifestUrl) + " · HTTP=" + code);
+                return childPlaylists;
+            }
+            InputStream input = connection.getInputStream();
+            byte[] bytes = input == null ? new byte[0] : readAll(input, 512 * 1024);
+            String manifest = new String(bytes, StandardCharsets.UTF_8);
+            if (!manifest.startsWith("#EXTM3U")) {
+                debugLog("RUTUBE_HLS_PROBE", debugSafeUrl(manifestUrl) + " · HTTP=" + code
+                        + " · type=" + safeShort(connection.getContentType(), 80)
+                        + " · bytes=" + bytes.length + " · ответ не похож на HLS");
+                return childPlaylists;
+            }
+
+            String pendingVariant = null;
+            int variants = 0;
+            int mediaSegments = 0;
+            String targetDuration = null;
+            boolean hasMap = false;
+            boolean hasKey = false;
+            ArrayList<String> variantSummary = new ArrayList<>();
+            ArrayList<String> audioSummary = new ArrayList<>();
+            String[] lines = manifest.replace("\r", "").split("\n");
+            for (String raw : lines) {
+                String line = raw.trim();
+                if (line.startsWith("#EXT-X-STREAM-INF:")) {
+                    pendingVariant = line;
+                    continue;
+                }
+                if (line.startsWith("#EXT-X-MEDIA:")) {
+                    Map<String, String> attrs = parseRutubeHlsAttributes(line);
+                    if ("AUDIO".equalsIgnoreCase(attrs.get("TYPE"))) {
+                        String rawUri = attrs.get("URI");
+                        String resolved = rawUri == null ? null : resolveRutubeHlsUri(manifestUrl, rawUri);
+                        if (resolved != null && !childPlaylists.contains(resolved)) childPlaylists.add(resolved);
+                        audioSummary.add("group=" + attrs.get("GROUP-ID") + ",name=" + attrs.get("NAME")
+                                + ",channels=" + attrs.get("CHANNELS") + ",uri="
+                                + (resolved == null ? (rawUri == null ? "нет" : "не прошёл allowlist") : debugSafeUrl(resolved)));
+                    }
+                    continue;
+                }
+                if (pendingVariant != null && !line.isEmpty() && !line.startsWith("#")) {
+                    Map<String, String> attrs = parseRutubeHlsAttributes(pendingVariant);
+                    String resolved = resolveRutubeHlsUri(manifestUrl, line);
+                    if (resolved != null && !childPlaylists.contains(resolved)) childPlaylists.add(resolved);
+                    String codecs = attrs.get("CODECS");
+                    boolean audioOnly = isAudioOnlyCodecList(codecs);
+                    variants++;
+                    variantSummary.add("bw=" + attrs.get("BANDWIDTH")
+                            + ",avg=" + attrs.get("AVERAGE-BANDWIDTH")
+                            + ",res=" + attrs.get("RESOLUTION")
+                            + ",codecs=" + codecs
+                            + ",audioGroup=" + attrs.get("AUDIO")
+                            + ",audioOnly=" + audioOnly
+                            + ",uri=" + (resolved == null ? "не прошёл allowlist" : debugSafeUrl(resolved)));
+                    pendingVariant = null;
+                    continue;
+                }
+                if (line.startsWith("#EXTINF:")) mediaSegments++;
+                else if (line.startsWith("#EXT-X-TARGETDURATION:")) targetDuration = line.substring(line.indexOf(':') + 1);
+                else if (line.startsWith("#EXT-X-MAP:")) hasMap = true;
+                else if (line.startsWith("#EXT-X-KEY:")) hasKey = true;
+            }
+
+            String kind = variants > 0 ? "HLS_MASTER" : "HLS_MEDIA";
+            debugLog("RUTUBE_HLS_PROBE", debugSafeUrl(manifestUrl)
+                    + " · HTTP=" + code + " · type=" + safeShort(connection.getContentType(), 70)
+                    + " · bytes=" + bytes.length + " · " + kind
+                    + " · variants=" + variants + " · segments=" + mediaSegments
+                    + " · targetDuration=" + targetDuration + " · map=" + hasMap + " · key=" + hasKey);
+            if (!variantSummary.isEmpty()) {
+                debugLog("RUTUBE_HLS_VARIANTS", debugSafeUrl(manifestUrl) + " · " + variantSummary);
+            }
+            if (!audioSummary.isEmpty()) {
+                debugLog("RUTUBE_HLS_AUDIO", debugSafeUrl(manifestUrl) + " · " + audioSummary);
+            }
+        } catch (Exception error) {
+            debugLog("RUTUBE_HLS_PROBE", debugSafeUrl(manifestUrl) + " · "
+                    + error.getClass().getSimpleName() + " · " + safeShort(error.getMessage(), 160));
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+        return childPlaylists;
+    }
+
+    private static Map<String, String> parseRutubeHlsAttributes(String line) {
+        Map<String, String> attrs = new HashMap<>();
+        int colon = line.indexOf(':');
+        if (colon < 0 || colon == line.length() - 1) return attrs;
+        String text = line.substring(colon + 1);
+        int position = 0;
+        while (position < text.length()) {
+            while (position < text.length()
+                    && (text.charAt(position) == ',' || Character.isWhitespace(text.charAt(position)))) position++;
+            int equals = text.indexOf('=', position);
+            if (equals < 0) break;
+            String key = text.substring(position, equals).trim().toUpperCase(Locale.ROOT);
+            position = equals + 1;
+            String value;
+            if (position < text.length() && text.charAt(position) == '"') {
+                int closingQuote = text.indexOf('"', position + 1);
+                if (closingQuote < 0) break;
+                value = text.substring(position + 1, closingQuote);
+                position = closingQuote + 1;
+            } else {
+                int comma = text.indexOf(',', position);
+                if (comma < 0) {
+                    value = text.substring(position).trim();
+                    position = text.length();
+                } else {
+                    value = text.substring(position, comma).trim();
+                    position = comma + 1;
+                }
+            }
+            if (!key.isEmpty()) attrs.put(key, value);
+        }
+        return attrs;
+    }
+
+    private static String resolveRutubeHlsUri(String baseUrl, String rawUri) {
+        if (rawUri == null || rawUri.trim().isEmpty()) return null;
+        try {
+            String resolved = new URL(new URL(baseUrl), rawUri.trim()).toExternalForm();
+            return isAllowedRutubeHls(resolved) ? resolved : null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private void probeRutubeDashManifests(ArrayList<String> candidates, String cookie,
+                                           String userAgent, String referer) {
+        if (candidates == null || candidates.isEmpty()) return;
+        Thread worker = new Thread(() -> {
+            int checked = 0;
+            for (String manifestUrl : candidates) {
+                if (checked >= MAX_DASH_CANDIDATES || !isAllowedRutubeDash(manifestUrl)) break;
+                checked++;
+                HttpURLConnection connection = null;
+                try {
+                    connection = (HttpURLConnection) new URL(manifestUrl).openConnection();
+                    connection.setInstanceFollowRedirects(true);
+                    connection.setConnectTimeout(7000);
+                    connection.setReadTimeout(7000);
+                    connection.setRequestProperty("User-Agent", userAgent == null ? VK_PROBE_USER_AGENT : userAgent);
+                    connection.setRequestProperty("Referer", referer == null ? "https://rutube.ru/" : referer);
+                    connection.setRequestProperty("Origin", "https://rutube.ru");
+                    connection.setRequestProperty("Accept", "application/dash+xml,application/xml,text/xml,*/*");
+                    connection.setRequestProperty("Accept-Encoding", "identity");
+                    if (cookie != null && !cookie.isEmpty()) connection.setRequestProperty("Cookie", cookie);
+                    int code = connection.getResponseCode();
+                    if (code < 200 || code >= 300) {
+                        debugLog("RUTUBE_DASH_PROBE", debugSafeUrl(manifestUrl) + " · HTTP=" + code);
+                        continue;
+                    }
+                    InputStream input = connection.getInputStream();
+                    byte[] bytes = input == null ? new byte[0] : readAll(input, 512 * 1024);
+                    String xml = new String(bytes, StandardCharsets.UTF_8);
+                    int audioSets = 0;
+                    int videoSets = 0;
+                    int otherSets = 0;
+                    int representations = 0;
+                    ArrayList<String> repSummary = new ArrayList<>();
+                    Matcher sets = Pattern.compile("(?is)<AdaptationSet\\b([^>]*)>(.*?)</AdaptationSet>").matcher(xml);
+                    while (sets.find()) {
+                        String attrs = sets.group(1);
+                        String inner = sets.group(2);
+                        String mime = xmlAttributeValue(attrs, "mimeType");
+                        String content = xmlAttributeValue(attrs, "contentType");
+                        boolean audio = "audio".equalsIgnoreCase(content) || (mime != null && mime.toLowerCase(Locale.ROOT).startsWith("audio/"));
+                        boolean video = "video".equalsIgnoreCase(content) || (mime != null && mime.toLowerCase(Locale.ROOT).startsWith("video/"));
+                        if (audio) audioSets++; else if (video) videoSets++; else otherSets++;
+                        Matcher reps = Pattern.compile("(?is)<Representation\\b([^>]*)>").matcher(inner);
+                        while (reps.find()) {
+                            representations++;
+                            if (repSummary.size() < 8) {
+                                String repAttrs = reps.group(1);
+                                repSummary.add("mime=" + xmlAttributeValue(repAttrs, "mimeType")
+                                        + ",codecs=" + xmlAttributeValue(repAttrs, "codecs")
+                                        + ",bw=" + xmlAttributeValue(repAttrs, "bandwidth"));
+                            }
+                        }
+                    }
+                    debugLog("RUTUBE_DASH_PROBE", debugSafeUrl(manifestUrl) + " · HTTP=" + code
+                            + " · MPD=" + xml.contains("<MPD") + " · bytes=" + bytes.length
+                            + " · AdaptationSet audio=" + audioSets + " video=" + videoSets
+                            + " other=" + otherSets + " · Representation=" + representations
+                            + " · " + repSummary);
+                } catch (Exception error) {
+                    debugLog("RUTUBE_DASH_PROBE", debugSafeUrl(manifestUrl) + " · "
+                            + error.getClass().getSimpleName() + " · " + safeShort(error.getMessage(), 160));
+                } finally {
+                    if (connection != null) connection.disconnect();
+                }
+            }
+        }, "RadioKp-RutubeDashProbe");
+        worker.setDaemon(true);
+        worker.start();
     }
 
     private static String buildRutubeApiDiagnostic(String url, int httpCode, String body,
