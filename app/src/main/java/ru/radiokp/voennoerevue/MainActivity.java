@@ -91,6 +91,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private TextView sourceView;
     private TextView elapsedView;
     private final StringBuilder vkDebugLog = new StringBuilder(32768);
+    private volatile boolean vkDebugEnabled;
+    private LinearLayout vkDebugPanel;
     private TextView vkDebugText;
     private ScrollView vkDebugScroll;
     private static final int MAX_VK_DEBUG_CHARS = 90000;
@@ -99,7 +101,6 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private String rutubeHlsDiagnostic = "Ожидание проверки HLS-плейлиста…";
     private volatile String vkApiDiagnostic = "VK: ожидание LIVE API…";
     private Button playPauseButton;
-    private Button sourcePageButton;
     private Button[] sourceButtons = new Button[3];
     private ProgressBar liveProgress;
     private WebView webView;
@@ -168,6 +169,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
         autoStart = preferences.getBoolean("auto_start", true);
         autoFailover = preferences.getBoolean("auto_failover", true);
+        vkDebugEnabled = preferences.getBoolean("vk_debug_enabled", false);
         vkQualityKbps = preferences.getInt("vk_quality_kbps", 64);
         rutubeQualityKbps = preferences.getInt("rutube_quality_kbps", 64);
         radioQualityKbps = preferences.getInt("radio_quality_kbps", 64);
@@ -278,15 +280,18 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         diagnosticLp.bottomMargin = dp(10);
         root.addView(diagnosticView, diagnosticLp);
 
+        vkDebugPanel = new LinearLayout(this);
+        vkDebugPanel.setOrientation(LinearLayout.VERTICAL);
+
         TextView debugHeading = text("ЖУРНАЛ ОТЛАДКИ VK", 12, Color.rgb(255, 125, 80), true);
         LinearLayout.LayoutParams debugHeadingLp = new LinearLayout.LayoutParams(-1, -2);
         debugHeadingLp.topMargin = dp(10);
         debugHeadingLp.bottomMargin = dp(6);
-        root.addView(debugHeading, debugHeadingLp);
+        vkDebugPanel.addView(debugHeading, debugHeadingLp);
 
         Button copyDebugButton = smallButton("КОПИРОВАТЬ DEBUG-ЛОГ", false);
         copyDebugButton.setOnClickListener(v -> copyVkDebugLog());
-        root.addView(copyDebugButton, new LinearLayout.LayoutParams(-1, dp(44)));
+        vkDebugPanel.addView(copyDebugButton, new LinearLayout.LayoutParams(-1, dp(44)));
 
         vkDebugScroll = new ScrollView(this);
         vkDebugScroll.setFillViewport(false);
@@ -298,7 +303,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         LinearLayout.LayoutParams debugScrollLp = new LinearLayout.LayoutParams(-1, dp(230));
         debugScrollLp.topMargin = dp(7);
         debugScrollLp.bottomMargin = dp(12);
-        root.addView(vkDebugScroll, debugScrollLp);
+        vkDebugPanel.addView(vkDebugScroll, debugScrollLp);
+        vkDebugPanel.setVisibility(vkDebugEnabled ? View.VISIBLE : View.GONE);
+        root.addView(vkDebugPanel);
 
         LinearLayout transport = new LinearLayout(this);
         transport.setGravity(Gravity.CENTER_VERTICAL);
@@ -342,14 +349,6 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             sourceButtons[i] = chip;
         }
         root.addView(choices);
-
-        sourcePageButton = smallButton("ПОКАЗАТЬ СТРАНИЦУ ИСТОЧНИКА", false);
-        sourcePageButton.setTextSize(11);
-        sourcePageButton.setVisibility(View.GONE);
-        sourcePageButton.setOnClickListener(v -> toggleSourcePage());
-        LinearLayout.LayoutParams sourcePageLp = new LinearLayout.LayoutParams(-1, dp(40));
-        sourcePageLp.topMargin = dp(9);
-        root.addView(sourcePageButton, sourcePageLp);
 
         TextView note = text("VK — основной  ·  RuTube — резерв  ·  Радио — последний резерв", 11, Color.rgb(130, 140, 154), false);
         LinearLayout.LayoutParams noteLp = new LinearLayout.LayoutParams(-1, -2);
@@ -444,7 +443,6 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         updateControls();
 
         if (source == SOURCE_RADIO) {
-            if (sourcePageButton != null) sourcePageButton.setVisibility(View.GONE);
             startRadioStream();
             return;
         }
@@ -462,12 +460,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         }
         liveProgress.setIndeterminate(true);
         createWebViewIfNeeded();
-        // Keep source discovery out of sight; the user can reveal the page only for manual selection.
+        // Keep source discovery hidden; the WebView is used only to extract stream metadata.
         webViewContainer.setVisibility(View.GONE);
-        if (sourcePageButton != null) {
-            sourcePageButton.setText(source == SOURCE_VK ? "ПОКАЗАТЬ СТРАНИЦУ VK" : "ПОКАЗАТЬ СТРАНИЦУ RUTUBE");
-            sourcePageButton.setVisibility(View.VISIBLE);
-        }
         webView.loadUrl(currentPageUrl);
         final int scheduledAttempt = attemptId;
         sourceTimeout = () -> {
@@ -548,7 +542,6 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         isPlaying = false;
         liveSessionActive = false;
         clearLiveStartTime();
-        if (sourcePageButton != null) sourcePageButton.setVisibility(View.GONE);
         liveProgress.setIndeterminate(false);
         liveProgress.setProgress(0);
         elapsedView.setText("НЕТ ДОСТУПНОГО ЭФИРА");
@@ -580,22 +573,11 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         handler.removeCallbacks(elapsedTicker);
         if (playbackService != null) playbackService.stopPlayback();
         releaseWebView();
-        if (sourcePageButton != null) sourcePageButton.setVisibility(View.GONE);
         liveProgress.setIndeterminate(false);
         liveProgress.setProgress(0);
         elapsedView.setText("ОСТАНОВЛЕНО");
         statusView.setText("Воспроизведение остановлено. Нажмите «Старт», чтобы подключиться снова.");
         updateControls();
-    }
-
-    private void toggleSourcePage() {
-        if (webView == null || webViewContainer == null) return;
-        boolean show = webViewContainer.getVisibility() != View.VISIBLE;
-        webViewContainer.setVisibility(show ? View.VISIBLE : View.GONE);
-        if (sourcePageButton != null) {
-            sourcePageButton.setText(show ? "СКРЫТЬ СТРАНИЦУ ИСТОЧНИКА" :
-                    (webSource == SOURCE_VK ? "ПОКАЗАТЬ СТРАНИЦУ VK" : "ПОКАЗАТЬ СТРАНИЦУ RUTUBE"));
-        }
     }
 
     private void createWebViewIfNeeded() {
@@ -1026,7 +1008,6 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             runOnUiThread(() -> {
                 if (currentSource == SOURCE_VK && !streamStarted) {
                     statusView.setText("Не нашёл карточку Радио КП с явной меткой LIVE. Запись вместо эфира запускать не буду.");
-                    if (sourcePageButton != null) sourcePageButton.setVisibility(View.VISIBLE);
                 }
             });
         }
@@ -1855,8 +1836,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             startElapsedTicker();
             statusView.setText("Найдено HLS: " + safeHls.size() + " · DASH: " + safeDash.size() + ". Ищу отдельное аудио…");
             Runnable play = () -> {
-                if (sourcePageButton != null) sourcePageButton.setVisibility(View.GONE);
-                releaseWebView();
+                    releaseWebView();
                 String referer = source == SOURCE_VK
                         ? (vkSelectedVideoUrl.isEmpty() ? "https://vkvideo.ru/" : vkSelectedVideoUrl)
                         : "https://rutube.ru/";
@@ -1921,6 +1901,23 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         failoverBox.setChecked(autoFailover);
         panel.addView(failoverBox);
 
+        TextView diagnosticsTitle = text("Диагностика", 14, Color.WHITE, true);
+        LinearLayout.LayoutParams diagnosticsTitleLp = new LinearLayout.LayoutParams(-1, -2);
+        diagnosticsTitleLp.topMargin = dp(14);
+        panel.addView(diagnosticsTitle, diagnosticsTitleLp);
+
+        CheckBox vkDebugBox = new CheckBox(this);
+        vkDebugBox.setText("Включить журнал отладки VK");
+        vkDebugBox.setTextColor(Color.WHITE);
+        vkDebugBox.setChecked(vkDebugEnabled);
+        panel.addView(vkDebugBox);
+
+        TextView debugNote = text("Включайте журнал только при поиске неисправностей. При выключении новые события не записываются, а накопленный журнал очищается.", 12, Color.rgb(150, 158, 171), false);
+        LinearLayout.LayoutParams debugNoteLp = new LinearLayout.LayoutParams(-1, -2);
+        debugNoteLp.leftMargin = dp(4);
+        debugNoteLp.topMargin = dp(2);
+        panel.addView(debugNote, debugNoteLp);
+
         TextView note = text("Для VK и RuTube это верхний предел, если платформа отдаёт несколько аудиодорожек. Радио: 32 / 64 / 128 кбит/с (примерно 14 / 29 / 58 МБ за час).", 12, Color.rgb(150, 158, 171), false);
         LinearLayout.LayoutParams noteLp = new LinearLayout.LayoutParams(-1, -2);
         noteLp.topMargin = dp(12);
@@ -1940,13 +1937,24 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                     radioQualityKbps = selectedRadioValue(radioGroup, radioOptions, radioQualityKbps);
                     autoStart = autoStartBox.isChecked();
                     autoFailover = failoverBox.isChecked();
+                    boolean wasVkDebugEnabled = vkDebugEnabled;
+                    vkDebugEnabled = vkDebugBox.isChecked();
                     preferences.edit()
                             .putInt("vk_quality_kbps", vkQualityKbps)
                             .putInt("rutube_quality_kbps", rutubeQualityKbps)
                             .putInt("radio_quality_kbps", radioQualityKbps)
                             .putBoolean("auto_start", autoStart)
                             .putBoolean("auto_failover", autoFailover)
+                            .putBoolean("vk_debug_enabled", vkDebugEnabled)
                             .apply();
+                    if (!vkDebugEnabled) {
+                        synchronized (vkDebugLog) { vkDebugLog.setLength(0); }
+                        if (vkDebugText != null) vkDebugText.setText("Журнал отключён.");
+                    } else if (!wasVkDebugEnabled) {
+                        synchronized (vkDebugLog) { vkDebugLog.setLength(0); }
+                        debugLog("DIAGNOSTICS", "Журнал VK включён пользователем");
+                    }
+                    if (vkDebugPanel != null) vkDebugPanel.setVisibility(vkDebugEnabled ? View.VISIBLE : View.GONE);
                     applyQualityToActivePlayer();
                     Toast.makeText(this, "Настройки сохранены", Toast.LENGTH_SHORT).show();
                 }).create();
@@ -2010,6 +2018,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     private void debugLog(String stage, String details) {
+        if (!vkDebugEnabled) return;
         String message = safeShort(details == null ? "" : details.replace('\n', ' ').replace('\r', ' '), 1800);
         String stamp = new java.text.SimpleDateFormat("HH:mm:ss.SSS", Locale.ROOT)
                 .format(new java.util.Date());
@@ -2526,7 +2535,6 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         if (webView != null && !streamStarted) {
             cancelSourceTimeout();
             releaseWebView();
-            if (sourcePageButton != null) sourcePageButton.setVisibility(View.GONE);
             if (statusView != null) statusView.setText("Поиск эфира приостановлен. Вернитесь в приложение и нажмите «Старт».");
         }
         if (bound) {
@@ -2536,18 +2544,6 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             playbackService = null;
         }
         super.onStop();
-    }
-
-    @Override public void onBackPressed() {
-        if (webView != null && webViewContainer.getVisibility() == View.VISIBLE && webView.canGoBack()) {
-            webView.goBack();
-        } else if (webView != null) {
-            releaseWebView();
-            if (sourcePageButton != null) sourcePageButton.setVisibility(View.GONE);
-            statusView.setText("Страница источника закрыта. Если эфир уже запущен, аудио продолжит играть.");
-        } else {
-            super.onBackPressed();
-        }
     }
 
     @Override protected void onDestroy() {
