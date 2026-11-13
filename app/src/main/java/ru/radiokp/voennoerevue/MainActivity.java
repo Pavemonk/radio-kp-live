@@ -112,6 +112,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private volatile String currentPageUrl = VK_LIVES_URL;
     private volatile String vkSelectedVideoUrl = "";
     private volatile boolean vkProbeRunning = false;
+    private final LinkedHashSet<String> vkDashProbeSeen = new LinkedHashSet<>();
     // True only after the VK feed scanner selected a card with an explicit LIVE badge.
     private volatile boolean vkLiveCardSelected = false;
     private volatile boolean streamStarted = false;
@@ -763,9 +764,14 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             ArrayList<String> dashResolved = source == SOURCE_RUTUBE && selectedSourceMetadata
                     ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
             if (source == SOURCE_VK) {
+                ArrayList<String> vkDashResearch = selectedSourceMetadata && !resolved.isEmpty()
+                        ? extractVkDashUrls(body) : new ArrayList<>();
                 debugLog("VK_PARSE", "selected=" + selectedSourceMetadata + " · HLS=" + resolved.size()
                         + " · HLS hosts=" + debugCandidateHosts(resolved)
                         + " · liveStart=" + liveStartMs);
+                debugLog("VK_DASH_FOUND", "candidateCount=" + vkDashResearch.size()
+                        + " · hosts=" + debugCandidateHosts(vkDashResearch));
+                probeVkDashManifests(vkDashResearch);
             }
             if (!resolved.isEmpty() || !dashResolved.isEmpty()) {
                 handleStreamResolved(resolved, dashResolved, source, liveStartMs);
@@ -1068,9 +1074,15 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             if (source == SOURCE_VK && !isVkLiveFeedPage(currentPageUrl)
                     && (!vkLiveCardSelected || !isSelectedVkVideoPage(currentPageUrl))) return;
             ArrayList<String> streams = source == SOURCE_VK ? extractVkHlsUrls(body) : extractRutubeLiveHlsUrls(body);
-            if (source == SOURCE_VK) debugLog("VK_PLAYER_TEXT", "bodyBytes=" + body.length()
-                    + " · json=" + debugJsonShape(body) + " · HLS=" + streams.size()
-                    + " · hosts=" + debugCandidateHosts(streams));
+            if (source == SOURCE_VK) {
+                debugLog("VK_PLAYER_TEXT", "bodyBytes=" + body.length()
+                        + " · json=" + debugJsonShape(body) + " · HLS=" + streams.size()
+                        + " · hosts=" + debugCandidateHosts(streams));
+                ArrayList<String> vkDashResearch = streams.isEmpty() ? new ArrayList<>() : extractVkDashUrls(body);
+                debugLog("VK_DASH_FOUND", "candidateCount=" + vkDashResearch.size()
+                        + " · hosts=" + debugCandidateHosts(vkDashResearch));
+                probeVkDashManifests(vkDashResearch);
+            }
             ArrayList<String> dashStreams = source == SOURCE_RUTUBE ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
             long liveStartMs = (!streams.isEmpty() || !dashStreams.isEmpty())
                     ? extractLiveStartTimeMs(body, source) : 0L;
@@ -1727,6 +1739,127 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
     private static boolean isAllowedVkHls(String url) {
         return url != null && url.startsWith("https://") && url.toLowerCase(Locale.ROOT).contains(".m3u8") && isVkCdnHost(Uri.parse(url).getHost());
+    }
+
+
+    /**
+     * Diagnostic-only VK DASH discovery. Candidates are accepted only when
+     * they are HTTPS MPD URLs on the same VK CDN allowlist as VK HLS.
+     * These URLs are never passed to the playback resolver in this build.
+     */
+    private static ArrayList<String> extractVkDashUrls(String body) {
+        LinkedHashSet<String> urls = new LinkedHashSet<>();
+        if (body == null || body.isEmpty()) return new ArrayList<>(urls);
+        String normalized = cleanUrl(body);
+        Matcher matcher = Pattern.compile("https?://[^\\s\\\"'<>]+?\\.mpd(?:\\?[^\\s\\\"'<>]*)?", Pattern.CASE_INSENSITIVE).matcher(normalized);
+        while (matcher.find() && urls.size() < MAX_DASH_CANDIDATES) {
+            String candidate = cleanUrl(matcher.group()).replaceAll("[),;]+$", "");
+            if (candidate.startsWith("https://") && candidate.toLowerCase(Locale.ROOT).contains(".mpd")) {
+                String host = Uri.parse(candidate).getHost();
+                if (isVkCdnHost(host)) urls.add(candidate);
+            }
+        }
+        return new ArrayList<>(urls);
+    }
+
+    private void probeVkDashManifests(ArrayList<String> candidates) {
+        if (!vkDebugEnabled || candidates == null || candidates.isEmpty()) return;
+        ArrayList<String> fresh = new ArrayList<>();
+        synchronized (vkDashProbeSeen) {
+            for (String candidate : candidates) {
+                if (fresh.size() >= 3) break;
+                if (vkDashProbeSeen.size() >= 6) break;
+                if (candidate != null && vkDashProbeSeen.add(candidate)) fresh.add(candidate);
+            }
+        }
+        for (String candidate : fresh) {
+            Thread probe = new Thread(() -> inspectVkDashManifest(candidate), "RadioKp-VkDashProbe");
+            probe.setDaemon(true);
+            probe.start();
+        }
+    }
+
+    private void inspectVkDashManifest(String manifestUrl) {
+        HttpURLConnection connection = null;
+        String host;
+        try { host = Uri.parse(manifestUrl).getHost(); }
+        catch (Exception ignored) { host = "unknown"; }
+        try {
+            connection = (HttpURLConnection) new URL(manifestUrl).openConnection();
+            connection.setInstanceFollowRedirects(true);
+            connection.setConnectTimeout(6000);
+            connection.setReadTimeout(6000);
+            connection.setRequestMethod("GET");
+            connection.setRequestProperty("User-Agent", VK_PROBE_USER_AGENT);
+            connection.setRequestProperty("Referer", currentPageUrl == null ? VK_LIVES_URL : currentPageUrl);
+            connection.setRequestProperty("Origin", "https://vkvideo.ru");
+            connection.setRequestProperty("Accept", "application/dash+xml,application/xml,text/xml,*/*");
+            connection.setRequestProperty("Range", "bytes=0-196607");
+            int code = connection.getResponseCode();
+            if (code < 200 || code >= 300) {
+                debugLog("VK_DASH_PROBE", "host=" + host + " · HTTP " + code);
+                return;
+            }
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            try (InputStream input = connection.getInputStream()) {
+                byte[] buffer = new byte[4096];
+                int total = 0, count;
+                while ((count = input.read(buffer)) != -1 && total < 196608) {
+                    int accepted = Math.min(count, 196608 - total);
+                    output.write(buffer, 0, accepted);
+                    total += accepted;
+                    if (accepted < count) break;
+                }
+            }
+            String xml = output.toString(StandardCharsets.UTF_8.name());
+            boolean isMpd = Pattern.compile("<(?:[A-Za-z0-9_]+:)?MPD\\b", Pattern.CASE_INSENSITIVE).matcher(xml).find();
+            int audioSets = 0, videoSets = 0, unknownSets = 0, representations = 0;
+            StringBuilder tracks = new StringBuilder();
+            Matcher sets = Pattern.compile("(?is)<(?:[A-Za-z0-9_]+:)?AdaptationSet\\b([^>]*)>(.*?)</(?:[A-Za-z0-9_]+:)?AdaptationSet\\s*>").matcher(xml);
+            while (sets.find()) {
+                String attrs = sets.group(1);
+                String inner = sets.group(2);
+                String mime = xmlAttributeValue(attrs, "mimeType");
+                String content = xmlAttributeValue(attrs, "contentType");
+                String codecs = xmlAttributeValue(attrs, "codecs");
+                Matcher reps = Pattern.compile("(?is)<(?:[A-Za-z0-9_]+:)?Representation\\b([^>]*)").matcher(inner);
+                while (reps.find()) {
+                    representations++;
+                    if (codecs == null) codecs = xmlAttributeValue(reps.group(1), "codecs");
+                }
+                String signature = ((mime == null ? "" : mime) + " " + (content == null ? "" : content) + " " + (codecs == null ? "" : codecs)).toLowerCase(Locale.ROOT);
+                boolean audio = signature.contains("audio/") || signature.contains("audio ") || signature.matches(".*\\b(mp4a|opus|ac-3|ec-3|ac-4|flac|alac)[^ ]*.*");
+                boolean video = signature.contains("video/") || signature.contains("video ") || signature.matches(".*\\b(avc|hvc|hev|vp09|vp9|av01)[^ ]*.*");
+                if (audio) audioSets++;
+                else if (video) videoSets++;
+                else unknownSets++;
+                if (tracks.length() < 1100) {
+                    tracks.append(" {").append(audio ? "AUDIO" : (video ? "VIDEO" : "OTHER"));
+                    if (mime != null) tracks.append(" mime=").append(mime);
+                    if (content != null) tracks.append(" type=").append(content);
+                    if (codecs != null) tracks.append(" codecs=").append(codecs);
+                    tracks.append("}");
+                }
+            }
+            String summary = "host=" + host + " · HTTP=" + code
+                    + " · contentType=" + safeShort(connection.getContentType(), 80)
+                    + " · MPD=" + isMpd + " · bytes=" + xml.length()
+                    + " · AdaptationSet audio=" + audioSets + " video=" + videoSets
+                    + " other=" + unknownSets + " · Representation=" + representations
+                    + tracks;
+            debugLog("VK_DASH_PROBE", summary);
+        } catch (Exception error) {
+            debugLog("VK_DASH_PROBE", "host=" + host + " · " + error.getClass().getSimpleName()
+                    + " · " + safeShort(error.getMessage(), 160));
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private static String xmlAttributeValue(String attributes, String name) {
+        if (attributes == null) return null;
+        Matcher matcher = Pattern.compile("(?i)\\b" + Pattern.quote(name) + "\\s*=\\s*\\\"([^\\\"]+)\\\"").matcher(attributes);
+        return matcher.find() ? matcher.group(1) : null;
     }
 
     private static boolean isAllowedRutubeHls(String url) {
