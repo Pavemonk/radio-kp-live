@@ -762,16 +762,16 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                         : extractRutubeLiveHlsUrls(body))
                     : new ArrayList<>();
             ArrayList<String> dashResolved = source == SOURCE_RUTUBE && selectedSourceMetadata
-                    ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
+                    ? extractRutubeLiveDashUrls(body)
+                    : (source == SOURCE_VK && selectedSourceMetadata && !resolved.isEmpty()
+                        ? extractVkDashUrls(body) : new ArrayList<>());
             if (source == SOURCE_VK) {
-                ArrayList<String> vkDashResearch = selectedSourceMetadata && !resolved.isEmpty()
-                        ? extractVkDashUrls(body) : new ArrayList<>();
                 debugLog("VK_PARSE", "selected=" + selectedSourceMetadata + " · HLS=" + resolved.size()
                         + " · HLS hosts=" + debugCandidateHosts(resolved)
                         + " · liveStart=" + liveStartMs);
-                debugLog("VK_DASH_FOUND", "candidateCount=" + vkDashResearch.size()
-                        + " · hosts=" + debugCandidateHosts(vkDashResearch));
-                probeVkDashManifests(vkDashResearch);
+                debugLog("VK_DASH_FOUND", "candidateCount=" + dashResolved.size()
+                        + " · hosts=" + debugCandidateHosts(dashResolved));
+                probeVkDashManifests(dashResolved);
             }
             if (!resolved.isEmpty() || !dashResolved.isEmpty()) {
                 handleStreamResolved(resolved, dashResolved, source, liveStartMs);
@@ -1083,7 +1083,9 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                         + " · hosts=" + debugCandidateHosts(vkDashResearch));
                 probeVkDashManifests(vkDashResearch);
             }
-            ArrayList<String> dashStreams = source == SOURCE_RUTUBE ? extractRutubeLiveDashUrls(body) : new ArrayList<>();
+            ArrayList<String> dashStreams = source == SOURCE_RUTUBE
+                    ? extractRutubeLiveDashUrls(body)
+                    : (source == SOURCE_VK && !streams.isEmpty() ? extractVkDashUrls(body) : new ArrayList<>());
             long liveStartMs = (!streams.isEmpty() || !dashStreams.isEmpty())
                     ? extractLiveStartTimeMs(body, source) : 0L;
             long liveDurationMs = (!streams.isEmpty() || !dashStreams.isEmpty())
