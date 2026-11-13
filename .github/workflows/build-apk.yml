@@ -3,7 +3,7 @@ name: Build Android APK
 
 on:
   push:
-    branches: [main]
+    branches: [main, vk-audio-research-0.7.27]
   workflow_dispatch:
 
 permissions:
