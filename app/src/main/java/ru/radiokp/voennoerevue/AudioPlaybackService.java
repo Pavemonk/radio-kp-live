@@ -253,7 +253,7 @@ public final class AudioPlaybackService extends Service {
         }
 
         audioModeStatus = "Проверяю HLS и DASH…";
-        notifyListener(false, "RuTube: проверяю DASH на отдельное аудиопредставление…");
+        notifyListener(false, currentSourceName + ": проверяю DASH на отдельное аудиопредставление…");
         Thread resolver = new Thread(() -> {
             DashAudioResolution dashResolution = resolveDashAudioCandidates();
             AudioPlaylistResolution hlsResolution = null;
@@ -604,7 +604,7 @@ public final class AudioPlaybackService extends Service {
 
     private DashAudioResolution resolveDashAudioCandidates() {
         if (currentDashCandidateUrls == null || currentDashCandidateUrls.isEmpty()) {
-            return new DashAudioResolution(null, "RuTube не объявил DASH/MPD в ответе LIVE API");
+            return new DashAudioResolution(null, currentSourceName + " не объявил DASH/MPD в ответе LIVE API");
         }
         int checked = 0;
         String firstReason = "отдельное аудиопредставление не найдено";
@@ -619,7 +619,8 @@ public final class AudioPlaybackService extends Service {
                 connection.setReadTimeout(7000);
                 connection.setRequestProperty("User-Agent", USER_AGENT);
                 connection.setRequestProperty("Referer", currentReferer);
-                connection.setRequestProperty("Origin", "https://rutube.ru");
+                connection.setRequestProperty("Origin", currentReferer.startsWith("https://rutube.ru")
+                        ? "https://rutube.ru" : "https://vkvideo.ru");
                 connection.setRequestProperty("Accept", "application/dash+xml,application/xml,text/xml,*/*");
                 connection.setRequestProperty("Accept-Encoding", "identity");
                 int code = connection.getResponseCode();
@@ -1052,8 +1053,9 @@ public final class AudioPlaybackService extends Service {
                     || host.equals("rutube.ru") || host.endsWith(".rutube.ru")
                     || host.equals("rtbcdn.ru") || host.endsWith(".rtbcdn.ru") || host.equals("rtbcdn.net") || host.endsWith(".rtbcdn.net");
             if (!allowedHost) return false;
-            return !isDashManifest(url) || host.equals("rutube.ru") || host.endsWith(".rutube.ru")
-                    || host.equals("rtbcdn.ru") || host.endsWith(".rtbcdn.ru") || host.equals("rtbcdn.net") || host.endsWith(".rtbcdn.net");
+            // Scheme and host allowlist have already been checked above.
+            // VK DASH manifests are served from approved VK CDN hosts too.
+            return true;
         } catch (Exception e) { return false; }
     }
 
