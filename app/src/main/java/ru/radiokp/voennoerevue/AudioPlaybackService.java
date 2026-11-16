@@ -1011,7 +1011,10 @@ public final class AudioPlaybackService extends Service {
     }
 
     private static boolean isDashManifest(String url) {
-        return url != null && url.toLowerCase(Locale.ROOT).contains(".mpd");
+        if (url == null) return false;
+        String lower = url.toLowerCase(Locale.ROOT);
+        return lower.contains(".mpd") || lower.contains("/dash/")
+                || lower.contains("stream.manifest") || lower.contains(".manifest");
     }
 
     private boolean isAllowedHlsStream(String url) {
