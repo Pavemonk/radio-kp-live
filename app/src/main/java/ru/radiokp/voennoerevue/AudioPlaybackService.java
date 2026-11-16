@@ -850,30 +850,24 @@ public final class AudioPlaybackService extends Service {
             return new AudioPlaylistResolution(null, "Аудио-only вариант найден, но его URL не прошёл проверку");
         }
 
-        // RuTube often publishes a muxed HLS master without an external
-        // AUDIO rendition. Choose the lowest-bandwidth combined A/V child
-        // playlist instead of letting ExoPlayer start at a high quality.
-        // VK keeps its existing audio-only selection logic unchanged.
-        if (isRutubeSource()) {
-            AudioPlaylistResolution lowBandwidth = findLowestBandwidthRutubeVariant(baseUrl, lines);
-            if (lowBandwidth != null && lowBandwidth.url != null) return lowBandwidth;
-        }
+        // If no dedicated audio rendition exists, lock playback to the
+        // lowest-bandwidth combined A/V child playlist. Passing the master
+        // playlist to ExoPlayer would allow adaptive selection of much higher
+        // video qualities even though the app is audio-only.
+        AudioPlaylistResolution lowBandwidth = findLowestBandwidthVariant(baseUrl, lines);
+        if (lowBandwidth != null && lowBandwidth.url != null) return lowBandwidth;
 
         return new AudioPlaylistResolution(null,
                 "Отдельная аудиодорожка или аудио-only вариант не объявлены; используется исходный HLS");
     }
 
 
-    private boolean isRutubeSource() {
-        return currentReferer != null && currentReferer.toLowerCase(Locale.ROOT).contains("rutube.ru");
-    }
-
     /**
-     * Last-resort traffic reduction for RuTube only: select the child playlist
+     * Last-resort traffic reduction for HLS sources: select the child playlist
      * with the smallest declared average/peak bandwidth. This remains a
      * combined audio+video stream; it is not audio-only.
      */
-    private AudioPlaylistResolution findLowestBandwidthRutubeVariant(String baseUrl, String[] lines) {
+    private AudioPlaylistResolution findLowestBandwidthVariant(String baseUrl, String[] lines) {
         String pendingVariantLine = null;
         String lowestUri = null;
         int lowestBandwidth = Integer.MAX_VALUE;
@@ -916,7 +910,7 @@ public final class AudioPlaybackService extends Service {
         }
 
         if (lowestUri == null) return null;
-        StringBuilder status = new StringBuilder("Используется самый низкобитрейтный HLS-вариант RuTube");
+        StringBuilder status = new StringBuilder("Используется самый низкобитрейтный HLS-вариант");
         status.append(" (").append(lowestBandwidth / 1000).append(" кбит/с");
         if (lowestResolution != null && !lowestResolution.isEmpty()) status.append(", ").append(lowestResolution);
         if (lowestCodecs != null && !lowestCodecs.isEmpty()) status.append(", ").append(lowestCodecs);
