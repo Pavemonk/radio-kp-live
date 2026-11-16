@@ -114,6 +114,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private volatile boolean vkProbeRunning = false;
     private final LinkedHashSet<String> vkDashProbeSeen = new LinkedHashSet<>();
     private final LinkedHashSet<String> rutubeHlsProbeSeen = new LinkedHashSet<>();
+    private final LinkedHashSet<String> vkNetworkRequestSeen = new LinkedHashSet<>();
+    private final LinkedHashSet<String> vkWebResponseSeen = new LinkedHashSet<>();
     // True only after the VK feed scanner selected a card with an explicit LIVE badge.
     private volatile boolean vkLiveCardSelected = false;
     private volatile boolean streamStarted = false;
@@ -695,9 +697,15 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             }
 
             @Override public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
-                if (request != null && request.isForMainFrame()) {
-                    debugLog("WEB_HTTP", "main frame HTTP " + (response == null ? "?" : response.getStatusCode())
-                            + " · " + debugSafeUrl(request.getUrl().toString()));
+                if (request != null) {
+                    String url = request.getUrl().toString();
+                    if (request.isForMainFrame()) {
+                        debugLog("WEB_HTTP", "main frame HTTP " + (response == null ? "?" : response.getStatusCode())
+                                + " · " + debugSafeUrl(url));
+                    } else if (source == SOURCE_VK && isVkDiagnosticRequest(url)) {
+                        debugLog("VK_NET_HTTP", "HTTP " + (response == null ? "?" : response.getStatusCode())
+                                + " · " + debugSafeUrl(url));
+                    }
                 }
             }
 
@@ -705,6 +713,17 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 String url = request.getUrl().toString();
                 String method = request.getMethod();
                 String host = request.getUrl().getHost();
+                if (source == SOURCE_VK && isVkDiagnosticRequest(url)) {
+                    String signature = method + " " + url;
+                    boolean fresh = false;
+                    synchronized (vkNetworkRequestSeen) {
+                        if (vkNetworkRequestSeen.size() < 100) fresh = vkNetworkRequestSeen.add(signature);
+                    }
+                    if (fresh) debugLog("VK_NET_REQUEST", "method=" + method
+                            + " · mainFrame=" + request.isForMainFrame()
+                            + " · headers=" + request.getRequestHeaders().keySet()
+                            + " · " + debugSafeUrl(url));
+                }
                 if (!"GET".equalsIgnoreCase(method)) return super.shouldInterceptRequest(view, request);
                 if (source == SOURCE_VK && url.contains("video.getVideoDiscover") && isVkHost(host)) {
                     debugLog("VK_DISCOVER", "seen method=" + method + " · " + debugSafeUrl(url));
@@ -767,7 +786,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                     : new ArrayList<>();
             ArrayList<String> dashResolved = source == SOURCE_RUTUBE && selectedSourceMetadata
                     ? extractRutubeLiveDashUrls(body)
-                    : (source == SOURCE_VK && selectedSourceMetadata && !resolved.isEmpty()
+                    : (source == SOURCE_VK && selectedSourceMetadata
                         ? extractVkDashUrls(body) : new ArrayList<>());
             if (source == SOURCE_RUTUBE) {
                 ArrayList<String> diagnosticHls = extractRutubeDiagnosticHlsUrls(body);
@@ -799,9 +818,14 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 debugLog("VK_PARSE", "selected=" + selectedSourceMetadata + " · HLS=" + resolved.size()
                         + " · HLS hosts=" + debugCandidateHosts(resolved)
                         + " · liveStart=" + liveStartMs);
-                debugLog("VK_DASH_FOUND", "candidateCount=" + dashResolved.size()
-                        + " · hosts=" + debugCandidateHosts(dashResolved));
+                ArrayList<String> diagnosticDash = selectedSourceMetadata ? extractVkDiagnosticDashUrls(body) : new ArrayList<>();
+                debugLog("VK_DASH_FOUND", "playableCandidates=" + dashResolved.size()
+                        + " · diagnosticCandidates=" + diagnosticDash.size()
+                        + " · playable=" + debugCandidateHosts(dashResolved)
+                        + " · diagnostic=" + debugCandidateHosts(diagnosticDash));
+                if (selectedSourceMetadata) debugLog("VK_TRANSPORT_HINTS", summarizeVkTransportHints(body));
                 probeVkDashManifests(dashResolved);
+                probeVkDashManifests(diagnosticDash);
             }
             if (!resolved.isEmpty() || !dashResolved.isEmpty()) {
                 handleStreamResolved(resolved, dashResolved, source, liveStartMs);
@@ -852,12 +876,12 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private static final String INSTALL_VK_HOOK_SCRIPT = "(function(){try{if(window.__radioKpHook)return;window.__radioKpHook=true;" +
             "function hideVideo(){try{document.querySelectorAll('video').forEach(function(v){v.style.setProperty('position','fixed','important');v.style.setProperty('left','-5px','important');v.style.setProperty('top','-5px','important');v.style.setProperty('width','1px','important');v.style.setProperty('height','1px','important');v.style.setProperty('opacity','0.001','important');v.style.setProperty('pointer-events','none','important');v.controls=false;v.muted=true;try{v.pause();v.removeAttribute('autoplay')}catch(e){}})}catch(e){}}" +
             "hideVideo();try{new MutationObserver(hideVideo).observe(document.documentElement,{childList:true,subtree:true})}catch(e){}" +
-            "function report(t){try{if(typeof t==='string'&&(t.indexOf('playerParams')!==-1||t.indexOf('hls')!==-1||t.indexOf('live_mp4')!==-1||t.indexOf('postlive_mp4')!==-1)&&window.AudioBridge)window.AudioBridge.onPossibleStreamText(t)}catch(e){}}" +
-            "var f=window.fetch;if(f)window.fetch=function(){return f.apply(this,arguments).then(function(r){try{r.clone().text().then(report)}catch(e){}return r})};" +
+            "function report(t,u,m,st){try{if(typeof t==='string'&&t.length<=4194304&&/(playerparams|hls|dash|\\.mpd|manifest|audio.?track|audio_url|codec|live_mp4|postlive_mp4|video_balancer|\\.m3u8|\\.m4a|\\.aac|\\.mp3)/i.test(t)&&window.AudioBridge&&window.AudioBridge.onVkWebResponse)window.AudioBridge.onVkWebResponse(String(m||'GET'),String(u||''),Number(st||0),t)}catch(e){}}" +
+            "var f=window.fetch;if(f)window.fetch=function(){var a=arguments,req=a[0],init=a[1]||{},u='';try{u=typeof req==='string'?req:(req&&req.url?req.url:String(req||''))}catch(e){}var m=init.method||(req&&req.method)||'GET';return f.apply(this,a).then(function(r){try{var clone=r.clone();clone.text().then(function(t){report(t,u,m,r.status)})}catch(e){}return r})};" +
             "try{if(window.cur&&window.cur.apiPrefetchCache)report(JSON.stringify({apiPrefetchCache:window.cur.apiPrefetchCache}))}catch(e){}" +
             "var op=XMLHttpRequest.prototype.open,se=XMLHttpRequest.prototype.send;" +
-            "XMLHttpRequest.prototype.open=function(m,u){this.__radioKpUrl=String(u||'');return op.apply(this,arguments)};" +
-            "XMLHttpRequest.prototype.send=function(){this.addEventListener('load',function(){try{report(this.responseText)}catch(e){}});return se.apply(this,arguments)};" +
+            "XMLHttpRequest.prototype.open=function(m,u){this.__radioKpUrl=String(u||'');this.__radioKpMethod=String(m||'GET');return op.apply(this,arguments)};" +
+            "XMLHttpRequest.prototype.send=function(){this.addEventListener('load',function(){try{report(this.responseText,this.__radioKpUrl,this.__radioKpMethod,this.status)}catch(e){}});return se.apply(this,arguments)};" +
             "}catch(e){}})();";
 
     /**
@@ -1075,18 +1099,23 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             if (source != SOURCE_VK || source != currentSource || source != webSource || streamStarted
                     || body == null || body.length() > 4 * 1024 * 1024) return false;
             ArrayList<String> streams = extractVkHlsUrls(body);
+            ArrayList<String> dash = extractVkDashUrls(body);
+            ArrayList<String> diagnosticDash = extractVkDiagnosticDashUrls(body);
             String state = findVkLiveStateSummary(body);
             debugLog("VK_AL_VIDEO_BRIDGE", "id=" + videoId + " · HTTP " + httpCode
-                    + " · " + state + " · HLS=" + streams.size()
-                    + " · hosts=" + debugCandidateHosts(streams));
+                    + " · " + state + " · HLS=" + streams.size() + " · DASH=" + dash.size()
+                    + " · hosts=" + debugCandidateHosts(streams) + " · DASH=" + debugCandidateHosts(dash));
+            debugLog("VK_AL_VIDEO_FORMATS", summarizeVkTransportHints(body));
+            probeVkDashManifests(dash);
+            probeVkDashManifests(diagnosticDash);
             setVkDiagnostic("al_video.php · " + videoId + " · HTTP " + httpCode + " · " + state
                     + " · HLS: " + streams.size());
-            if (streams.isEmpty()) return false;
+            if (streams.isEmpty() && dash.isEmpty()) return false;
             vkSelectedVideoUrl = "https://vkvideo.ru/video" + videoId;
             currentPageUrl = vkSelectedVideoUrl;
             vkLiveCardSelected = true;
             long liveStartMs = extractLiveStartTimeMs(body, SOURCE_VK);
-            handleStreamResolved(streams, new ArrayList<>(), SOURCE_VK, liveStartMs);
+            handleStreamResolved(streams, dash, SOURCE_VK, liveStartMs);
             return true;
         }
         @JavascriptInterface public void onVkProbeError(String videoId, String error) {
@@ -1099,6 +1128,30 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             debugLog("VK_SCAN_END", safeShort(message, 300));
             setVkDiagnostic("VK: " + message);
         }
+        @JavascriptInterface public void onVkWebResponse(String method, String url, int httpCode, String body) {
+            if (source != SOURCE_VK || source != currentSource || source != webSource
+                    || body == null || body.length() > 4 * 1024 * 1024) return;
+            if (!isVkLiveFeedPage(currentPageUrl)
+                    && (!vkLiveCardSelected || !isSelectedVkVideoPage(currentPageUrl))) return;
+            String signature = String.valueOf(method) + "|" + String.valueOf(url) + "|" + body.length() + "|" + body.hashCode();
+            boolean fresh;
+            synchronized (vkWebResponseSeen) {
+                fresh = vkWebResponseSeen.size() < 80 && vkWebResponseSeen.add(signature);
+            }
+            if (!fresh) return;
+            debugLog("VK_WEB_RESPONSE", "method=" + safeShort(method, 12) + " · HTTP=" + httpCode
+                    + " · bytes=" + body.length() + " · url=" + debugSafeUrl(url));
+            debugLog("VK_WEB_FORMAT_HINTS", summarizeVkTransportHints(body));
+            ArrayList<String> diagnosticDash = extractVkDiagnosticDashUrls(body);
+            ArrayList<String> strictDash = extractVkDashUrls(body);
+            if (!diagnosticDash.isEmpty() || !strictDash.isEmpty()) {
+                debugLog("VK_WEB_DASH", "strict=" + debugCandidateHosts(strictDash)
+                        + " · diagnostic=" + debugCandidateHosts(diagnosticDash));
+                probeVkDashManifests(strictDash);
+                probeVkDashManifests(diagnosticDash);
+            }
+            onPossibleStreamText(body);
+        }
         @JavascriptInterface public void onPossibleStreamText(String body) {
             if (body == null || body.length() > 4 * 1024 * 1024 || source != currentSource || source != webSource) return;
             if (source == SOURCE_VK && !isVkLiveFeedPage(currentPageUrl)
@@ -1108,10 +1161,15 @@ public final class MainActivity extends Activity implements AudioPlaybackService
                 debugLog("VK_PLAYER_TEXT", "bodyBytes=" + body.length()
                         + " · json=" + debugJsonShape(body) + " · HLS=" + streams.size()
                         + " · hosts=" + debugCandidateHosts(streams));
-                ArrayList<String> vkDashResearch = streams.isEmpty() ? new ArrayList<>() : extractVkDashUrls(body);
-                debugLog("VK_DASH_FOUND", "candidateCount=" + vkDashResearch.size()
-                        + " · hosts=" + debugCandidateHosts(vkDashResearch));
+                ArrayList<String> vkDashResearch = extractVkDashUrls(body);
+                ArrayList<String> vkDashDiagnostic = extractVkDiagnosticDashUrls(body);
+                debugLog("VK_DASH_FOUND", "playableCandidates=" + vkDashResearch.size()
+                        + " · diagnosticCandidates=" + vkDashDiagnostic.size()
+                        + " · playable=" + debugCandidateHosts(vkDashResearch)
+                        + " · diagnostic=" + debugCandidateHosts(vkDashDiagnostic));
+                debugLog("VK_TRANSPORT_HINTS", summarizeVkTransportHints(body));
                 probeVkDashManifests(vkDashResearch);
+                probeVkDashManifests(vkDashDiagnostic);
             } else if (source == SOURCE_RUTUBE) {
                 ArrayList<String> diagnosticHls = extractRutubeDiagnosticHlsUrls(body);
                 ArrayList<String> diagnosticDash = extractRutubeDiagnosticDashUrls(body);
@@ -1129,7 +1187,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             }
             ArrayList<String> dashStreams = source == SOURCE_RUTUBE
                     ? extractRutubeLiveDashUrls(body)
-                    : (source == SOURCE_VK && !streams.isEmpty() ? extractVkDashUrls(body) : new ArrayList<>());
+                    : (source == SOURCE_VK ? extractVkDashUrls(body) : new ArrayList<>());
             long liveStartMs = (!streams.isEmpty() || !dashStreams.isEmpty())
                     ? extractLiveStartTimeMs(body, source) : 0L;
             long liveDurationMs = (!streams.isEmpty() || !dashStreams.isEmpty())
@@ -1793,6 +1851,128 @@ public final class MainActivity extends Activity implements AudioPlaybackService
      * they are HTTPS MPD URLs on the same VK CDN allowlist as VK HLS.
      * These URLs are never passed to the playback resolver in this build.
      */
+    private static boolean isVkDiagnosticRequest(String rawUrl) {
+        if (rawUrl == null || rawUrl.isEmpty()) return false;
+        String lower = rawUrl.toLowerCase(Locale.ROOT);
+        String host = Uri.parse(rawUrl).getHost();
+        if (!isVkHost(host) && !isVkCdnHost(host)) return false;
+        return lower.contains("al_video.php") || lower.contains("video.getvideodiscover")
+                || lower.contains("act=show") || lower.contains(".m3u8") || lower.contains(".mpd")
+                || lower.contains("/hls/") || lower.contains("/dash/") || lower.contains("manifest")
+                || lower.contains("playerparams") || lower.contains("audio_track") || lower.contains("audio_url")
+                || lower.contains(".m4a") || lower.contains(".aac") || lower.contains(".mp3")
+                || lower.contains(".m4s") || lower.contains(".mp4");
+    }
+
+    private static String summarizeVkTransportHints(String body) {
+        Object parsed = parseJsonBody(body);
+        if (parsed == null) return "not-json · chars=" + (body == null ? 0 : body.length())
+                + " · mpd=" + (body != null && body.toLowerCase(Locale.ROOT).contains(".mpd"))
+                + " · dash=" + (body != null && body.toLowerCase(Locale.ROOT).contains("dash"));
+        StringBuilder out = new StringBuilder();
+        int[] budget = {0};
+        collectVkTransportHints(parsed, "$", 0, out, budget);
+        return out.length() == 0 ? "JSON разобран · релевантных полей не найдено · root="
+                + (parsed instanceof JSONObject ? limitedJsonKeys((JSONObject) parsed, 30) : "array") : out.toString();
+    }
+
+    private static void collectVkTransportHints(Object node, String path, int depth, StringBuilder out, int[] budget) {
+        if (node == null || depth > 12 || budget[0] >= 34) return;
+        if (node instanceof JSONObject) {
+            JSONObject object = (JSONObject) node;
+            JSONArray names = object.names();
+            if (names == null) return;
+            for (int i = 0; i < names.length() && budget[0] < 34; i++) {
+                String key = names.optString(i);
+                Object value = object.opt(key);
+                String childPath = path + "." + key;
+                String lower = key.toLowerCase(Locale.ROOT);
+                boolean hint = lower.matches(".*(dash|mpd|audio|codec|manifest|format|stream|playlist|quality|protocol|mime|container|file|url|src|hls|live|video|track|bitrate|media).*");
+                if (hint) {
+                    if (out.length() > 0) out.append(" · ");
+                    out.append(childPath).append("=");
+                    if (value == null || value == JSONObject.NULL) out.append("null");
+                    else if (value instanceof JSONObject) out.append("object{").append(limitedJsonKeys((JSONObject) value, 12)).append("}");
+                    else if (value instanceof JSONArray) {
+                        JSONArray array = (JSONArray) value;
+                        out.append("array[").append(array.length()).append("]");
+                        JSONObject first = array.optJSONObject(0);
+                        if (first != null) out.append(" first{").append(limitedJsonKeys(first, 10)).append("}");
+                    } else if (value instanceof String) {
+                        String text = ((String) value).trim();
+                        String lowText = text.toLowerCase(Locale.ROOT);
+                        if (text.startsWith("https://") || text.startsWith("http://") || text.startsWith("//")) out.append(debugSafeUrl(text.startsWith("//") ? "https:" + text : text));
+                        else if (text.length() <= 72 && (lower.matches(".*(type|codec|protocol|mime|container|format|quality|bitrate|kind).*")
+                                || lowText.matches("(audio|video|application|dash|hls|mpd|mp4|aac|opus|avc|vp9|av1|[0-9]{2,8})"))) out.append("\"").append(text.replace("\"", "")).append("\"");
+                        else out.append("string(").append(text.length()).append(")");
+                    } else out.append(String.valueOf(value));
+                    budget[0]++;
+                }
+                if (value instanceof JSONObject || value instanceof JSONArray) collectVkTransportHints(value, childPath, depth + 1, out, budget);
+                else if (value instanceof String) {
+                    String text = (String) value;
+                    if (text.startsWith("{") || text.startsWith("[")) {
+                        Object nested = parseJsonBody(text);
+                        if (nested != null) collectVkTransportHints(nested, childPath, depth + 1, out, budget);
+                    }
+                }
+            }
+        } else if (node instanceof JSONArray) {
+            JSONArray array = (JSONArray) node;
+            for (int i = 0; i < array.length() && i < 20 && budget[0] < 34; i++) {
+                Object value = array.opt(i);
+                if (value instanceof JSONObject || value instanceof JSONArray) collectVkTransportHints(value, path + "[" + i + "]", depth + 1, out, budget);
+            }
+        }
+    }
+
+    private static ArrayList<String> extractVkDiagnosticDashUrls(String body) {
+        LinkedHashSet<String> urls = new LinkedHashSet<>();
+        if (body == null || body.isEmpty()) return new ArrayList<>(urls);
+        String normalized = body.replace("\\/", "/").replace("\\u002f", "/").replace("\\u002F", "/");
+        Matcher matcher = Pattern.compile("https?://[^\\s\\\"'<>]+", Pattern.CASE_INSENSITIVE).matcher(normalized);
+        while (matcher.find() && urls.size() < 8) {
+            String candidate = cleanUrl(matcher.group()).replaceAll("[),;]+$", "");
+            String lower = candidate.toLowerCase(Locale.ROOT);
+            if (lower.contains(".mpd") || lower.contains("/dash/") || lower.contains("/manifest")) {
+                try { if (candidate.startsWith("https://") && isVkCdnHost(Uri.parse(candidate).getHost())) urls.add(candidate); }
+                catch (Exception ignored) { }
+            }
+        }
+        Object parsed = parseJsonBody(body);
+        collectVkDashFields(parsed, urls, false, 0);
+        return new ArrayList<>(urls);
+    }
+
+    private static void collectVkDashFields(Object node, LinkedHashSet<String> urls, boolean dashContext, int depth) {
+        if (node == null || depth > 16 || urls.size() >= 8) return;
+        if (node instanceof JSONObject) {
+            JSONObject object = (JSONObject) node;
+            JSONArray names = object.names();
+            if (names == null) return;
+            for (int i = 0; i < names.length() && urls.size() < 8; i++) {
+                String key = names.optString(i);
+                Object value = object.opt(key);
+                String lower = key.toLowerCase(Locale.ROOT);
+                boolean context = dashContext || lower.matches(".*(dash|mpd|manifest).*");
+                if (value instanceof String) {
+                    String candidate = ((String) value).trim().replace("\\/", "/");
+                    String candidateLower = candidate.toLowerCase(Locale.ROOT);
+                    if (candidate.startsWith("https://") && (context || candidateLower.contains(".mpd") || candidateLower.contains("/dash/") || candidateLower.contains("/manifest"))) {
+                        try { if (isVkCdnHost(Uri.parse(candidate).getHost())) urls.add(candidate); } catch (Exception ignored) { }
+                    }
+                    if (candidate.startsWith("{") || candidate.startsWith("[")) {
+                        Object nested = parseJsonBody(candidate);
+                        if (nested != null) collectVkDashFields(nested, urls, context, depth + 1);
+                    }
+                } else if (value instanceof JSONObject || value instanceof JSONArray) collectVkDashFields(value, urls, context, depth + 1);
+            }
+        } else if (node instanceof JSONArray) {
+            JSONArray array = (JSONArray) node;
+            for (int i = 0; i < array.length() && i < 24 && urls.size() < 8; i++) collectVkDashFields(array.opt(i), urls, dashContext, depth + 1);
+        }
+    }
+
     private static ArrayList<String> extractVkDashUrls(String body) {
         LinkedHashSet<String> urls = new LinkedHashSet<>();
         if (body == null || body.isEmpty()) return new ArrayList<>(urls);
@@ -2249,13 +2429,13 @@ public final class MainActivity extends Activity implements AudioPlaybackService
             String rawPath = uri.getPath() == null ? "/" : uri.getPath();
             StringBuilder safePath = new StringBuilder();
             String[] parts = rawPath.split("/", -1);
+            String previous = "";
             for (String part : parts) {
                 safePath.append('/');
-                if (part.matches("(?i)[a-z0-9_-]{18,}") || part.matches("(?i)[a-f0-9]{16,}")) {
-                    safePath.append("[сегмент скрыт]");
-                } else {
-                    safePath.append(part);
-                }
+                if (previous.matches("(?i)sig|signature|token|auth|access_token|key|secret|hash|expires|srcip")) safePath.append("[секрет скрыт]");
+                else if (part.matches("(?i)[a-z0-9_-]{18,}") || part.matches("(?i)[a-f0-9]{16,}")) safePath.append("[сегмент скрыт]");
+                else safePath.append(part);
+                previous = part;
             }
             String shownPath = safePath.length() == 0 ? "/" : safePath.toString();
             return uri.getScheme() + "://" + host + shownPath
