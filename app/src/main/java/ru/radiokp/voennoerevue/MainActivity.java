@@ -1976,16 +1976,37 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private static ArrayList<String> extractVkDashUrls(String body) {
         LinkedHashSet<String> urls = new LinkedHashSet<>();
         if (body == null || body.isEmpty()) return new ArrayList<>(urls);
-        String normalized = cleanUrl(body);
-        Matcher matcher = Pattern.compile("https?://[^\\s\\\"'<>]+?\\.mpd(?:\\?[^\\s\\\"'<>]*)?", Pattern.CASE_INSENSITIVE).matcher(normalized);
+
+        // VK uses DASH URLs such as /dash/<id>/stream.manifest/.../video.
+        // They are valid MPD manifests even though the URL does not end in .mpd.
+        ArrayList<String> discovered = extractVkDiagnosticDashUrls(body);
+        for (String candidate : discovered) {
+            if (urls.size() >= MAX_DASH_CANDIDATES) break;
+            if (isVkDashManifestCandidate(candidate)) urls.add(candidate);
+        }
+
+        // Keep support for conventional .mpd endpoints as well.
+        String normalized = cleanUrl(body).replace("\\\\/", "/");
+        Matcher matcher = Pattern.compile("https?://[^\\\\s\\\\\"'<>]+?\\\\.mpd(?:\\\\?[^\\\\s\\\\\"'<>]*)?", Pattern.CASE_INSENSITIVE).matcher(normalized);
         while (matcher.find() && urls.size() < MAX_DASH_CANDIDATES) {
             String candidate = cleanUrl(matcher.group()).replaceAll("[),;]+$", "");
-            if (candidate.startsWith("https://") && candidate.toLowerCase(Locale.ROOT).contains(".mpd")) {
-                String host = Uri.parse(candidate).getHost();
-                if (isVkCdnHost(host)) urls.add(candidate);
-            }
+            if (isVkDashManifestCandidate(candidate)) urls.add(candidate);
         }
         return new ArrayList<>(urls);
+    }
+
+    private static boolean isVkDashManifestCandidate(String candidate) {
+        if (candidate == null || !candidate.startsWith("https://")) return false;
+        try {
+            Uri uri = Uri.parse(candidate);
+            if (!isVkCdnHost(uri.getHost())) return false;
+            String pathAndQuery = ((uri.getEncodedPath() == null ? "" : uri.getEncodedPath()) + "?"
+                    + (uri.getEncodedQuery() == null ? "" : uri.getEncodedQuery())).toLowerCase(Locale.ROOT);
+            return pathAndQuery.contains(".mpd") || pathAndQuery.contains("/dash/")
+                    || pathAndQuery.contains("stream.manifest") || pathAndQuery.contains(".manifest");
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private void probeVkDashManifests(ArrayList<String> candidates) {
