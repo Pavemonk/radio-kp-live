@@ -1022,7 +1022,28 @@ public final class AudioPlaybackService extends Service {
     }
 
     private boolean isAllowedDashStream(String url) {
-        return isAllowedStream(url, false) && isDashManifest(url);
+        if (isAllowedStream(url, false) && isDashManifest(url)) return true;
+        if (url == null) return false;
+        try {
+            android.net.Uri uri = android.net.Uri.parse(url);
+            String host = uri.getHost();
+            if (host == null || !"https".equalsIgnoreCase(uri.getScheme())) return false;
+            return isVkDashCdnHost(host);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private static boolean isVkDashCdnHost(String host) {
+        if (host == null) return false;
+        host = host.toLowerCase(Locale.ROOT);
+        return host.endsWith(".okcdn.ru") || host.endsWith(".vkuservideo.net") || host.endsWith(".vkuservideo.com")
+                || host.endsWith(".vkuservideo.ru") || host.endsWith(".userapi.com") || host.endsWith(".userapi.ru")
+                || host.endsWith(".vkuseraudio.net") || host.endsWith(".vkuseraudio.ru") || host.endsWith(".vkuseraudio.com")
+                || host.endsWith(".vkuserlive.net") || host.endsWith(".vkuserlive.com") || host.endsWith(".vkuser.net")
+                || host.endsWith(".vkusercdn.ru") || host.endsWith(".cdn-vk.ru") || host.endsWith(".cdn-vk.net")
+                || host.endsWith(".cdn-vk.com") || host.endsWith(".vk-cdn.me") || host.endsWith(".vk-cdn.net")
+                || host.endsWith(".vkcache.com") || host.endsWith(".vkcdnservice.com") || host.endsWith(".mycdn.me");
     }
 
     private boolean isAllowedStream(String url, boolean mp3) {
