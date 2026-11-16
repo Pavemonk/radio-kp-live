@@ -1975,22 +1975,30 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
     private static ArrayList<String> extractVkDashUrls(String body) {
         LinkedHashSet<String> urls = new LinkedHashSet<>();
+        LinkedHashSet<String> seenHosts = new LinkedHashSet<>();
         if (body == null || body.isEmpty()) return new ArrayList<>(urls);
 
-        // VK uses DASH URLs such as /dash/<id>/stream.manifest/.../video.
-        // They are valid MPD manifests even though the URL does not end in .mpd.
+        // URLs are discovered from DASH-specific VK metadata. Some CDN mirrors
+        // omit ".mpd" and "/dash/" in the final URL, so retain trusted CDN hosts
+        // and let the service verify the response is a real MPD with audio.
         ArrayList<String> discovered = extractVkDiagnosticDashUrls(body);
         for (String candidate : discovered) {
             if (urls.size() >= MAX_DASH_CANDIDATES) break;
-            if (isVkDashManifestCandidate(candidate)) urls.add(candidate);
+            if (isVkDashManifestCandidate(candidate)) {
+                String host = Uri.parse(candidate).getHost();
+                if (host != null && seenHosts.add(host.toLowerCase(Locale.ROOT))) urls.add(candidate);
+            }
         }
 
-        // Keep support for conventional .mpd endpoints as well.
+        // Keep support for conventional .mpd endpoints.
         String normalized = cleanUrl(body).replace("\\\\/", "/");
-        Matcher matcher = Pattern.compile("https?://[^\\\\s\\\\\"'<>]+?\\\\.mpd(?:\\\\?[^\\\\s\\\\\"'<>]*)?", Pattern.CASE_INSENSITIVE).matcher(normalized);
+        Matcher matcher = Pattern.compile("https?://[^\\s\\\"'<>]+?\\.mpd(?:\\?[^\\s\\\"'<>]*)?", Pattern.CASE_INSENSITIVE).matcher(normalized);
         while (matcher.find() && urls.size() < MAX_DASH_CANDIDATES) {
             String candidate = cleanUrl(matcher.group()).replaceAll("[),;]+$", "");
-            if (isVkDashManifestCandidate(candidate)) urls.add(candidate);
+            if (isVkDashManifestCandidate(candidate)) {
+                String host = Uri.parse(candidate).getHost();
+                if (host != null && seenHosts.add(host.toLowerCase(Locale.ROOT))) urls.add(candidate);
+            }
         }
         return new ArrayList<>(urls);
     }
@@ -1998,17 +2006,13 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private static boolean isVkDashManifestCandidate(String candidate) {
         if (candidate == null || !candidate.startsWith("https://")) return false;
         try {
-            Uri uri = Uri.parse(candidate);
-            if (!isVkCdnHost(uri.getHost())) return false;
-            String pathAndQuery = ((uri.getEncodedPath() == null ? "" : uri.getEncodedPath()) + "?"
-                    + (uri.getEncodedQuery() == null ? "" : uri.getEncodedQuery())).toLowerCase(Locale.ROOT);
-            return pathAndQuery.contains(".mpd") || pathAndQuery.contains("/dash/")
-                    || pathAndQuery.contains("stream.manifest") || pathAndQuery.contains(".manifest");
+            // DASH-specific metadata + VK CDN allowlist are the URL-level checks.
+            // The playback service validates MPD XML and separate audio before use.
+            return isVkCdnHost(Uri.parse(candidate).getHost());
         } catch (Exception ignored) {
             return false;
         }
     }
-
     private void probeVkDashManifests(ArrayList<String> candidates) {
         if (!vkDebugEnabled || candidates == null || candidates.isEmpty()) return;
         ArrayList<String> fresh = new ArrayList<>();
