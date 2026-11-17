@@ -2390,6 +2390,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         });
     }
 
+    @Override public void onPlaybackDiagnostic(String stage, String details) {
+        debugLog(stage, details);
+    }
+
     private void renderRutubeDiagnostics() {
         if (diagnosticView == null || currentSource != SOURCE_RUTUBE) return;
         diagnosticView.setVisibility(View.VISIBLE);
@@ -2424,6 +2428,10 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private void copyVkDebugLog() {
         String contents;
         synchronized (vkDebugLog) { contents = vkDebugLog.toString(); }
+        String serviceHistory = playbackService == null ? "" : playbackService.getPlaybackDiagnosticSnapshot();
+        if (serviceHistory != null && !serviceHistory.trim().isEmpty()) {
+            contents = contents + "\n--- AUDIO SERVICE DIAGNOSTICS (persisted) ---\n" + serviceHistory;
+        }
         if (contents.isEmpty()) {
             Toast.makeText(this, "Журнал пока пуст", Toast.LENGTH_SHORT).show();
             return;
