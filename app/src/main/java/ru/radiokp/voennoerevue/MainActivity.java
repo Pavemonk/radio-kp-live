@@ -96,6 +96,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private TextView vkDebugText;
     private ScrollView vkDebugScroll;
     private static final int MAX_VK_DEBUG_CHARS = 90000;
+    private static final int REQUEST_SAVE_DEBUG_LOG = 7401;
+    private String pendingDebugLogExport = null;
     private TextView diagnosticView;
     private String rutubeApiDiagnostic = "Ожидание ответа LIVE API…";
     private String rutubeHlsDiagnostic = "Ожидание проверки HLS-плейлиста…";
@@ -293,8 +295,8 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         debugHeadingLp.bottomMargin = dp(6);
         vkDebugPanel.addView(debugHeading, debugHeadingLp);
 
-        Button copyDebugButton = smallButton("КОПИРОВАТЬ DEBUG-ЛОГ", false);
-        copyDebugButton.setOnClickListener(v -> copyVkDebugLog());
+        Button copyDebugButton = smallButton("СОХРАНИТЬ ЛОГ В TXT", false);
+        copyDebugButton.setOnClickListener(v -> saveVkDebugLog());
         vkDebugPanel.addView(copyDebugButton, new LinearLayout.LayoutParams(-1, dp(44)));
 
         vkDebugScroll = new ScrollView(this);
@@ -2425,20 +2427,56 @@ public final class MainActivity extends Activity implements AudioPlaybackService
         });
     }
 
-    private void copyVkDebugLog() {
+    private void saveVkDebugLog() {
         String contents;
         synchronized (vkDebugLog) { contents = vkDebugLog.toString(); }
         String serviceHistory = playbackService == null ? "" : playbackService.getPlaybackDiagnosticSnapshot();
         if (serviceHistory != null && !serviceHistory.trim().isEmpty()) {
             contents = contents + "\n--- AUDIO SERVICE DIAGNOSTICS (persisted) ---\n" + serviceHistory;
         }
-        if (contents.isEmpty()) {
+        if (contents.trim().isEmpty()) {
             Toast.makeText(this, "Журнал пока пуст", Toast.LENGTH_SHORT).show();
             return;
         }
-        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-        if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("Radio KP VK debug log", contents));
-        Toast.makeText(this, "Журнал диагностики скопирован. Вставь его сюда целиком.", Toast.LENGTH_LONG).show();
+        pendingDebugLogExport = contents;
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("text/plain");
+        intent.putExtra(Intent.EXTRA_TITLE, "radio-kp-debug-" +
+                new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
+                        .format(new java.util.Date()) + ".txt");
+        try {
+            startActivityForResult(intent, REQUEST_SAVE_DEBUG_LOG);
+        } catch (Exception e) {
+            pendingDebugLogExport = null;
+            Toast.makeText(this, "Не удалось открыть сохранение TXT: " + e.getMessage(),
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_SAVE_DEBUG_LOG) return;
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            pendingDebugLogExport = null;
+            return;
+        }
+        final String contents = pendingDebugLogExport;
+        pendingDebugLogExport = null;
+        if (contents == null) {
+            Toast.makeText(this, "Нет данных для сохранения", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        try (OutputStream output = getContentResolver().openOutputStream(data.getData(), "w")) {
+            if (output == null) throw new java.io.IOException("Не удалось открыть файл");
+            output.write(contents.getBytes(StandardCharsets.UTF_8));
+            output.flush();
+            Toast.makeText(this, "Полный журнал сохранён в TXT", Toast.LENGTH_LONG).show();
+        } catch (Exception e) {
+            Toast.makeText(this, "Ошибка сохранения TXT: " + e.getMessage(),
+                    Toast.LENGTH_LONG).show();
+        }
     }
 
     private static String safeShort(String value, int maxChars) {
