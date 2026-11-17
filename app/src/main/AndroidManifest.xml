@@ -8,7 +8,7 @@
 
     <application
         android:allowBackup="false"
-        android:label="Радио КП — AUDIO DEBUG 0.7.36"
+        android:label="Радио КП — LIVE AUDIO DEBUG 0.7.37"
         android:usesCleartextTraffic="true"
         android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
