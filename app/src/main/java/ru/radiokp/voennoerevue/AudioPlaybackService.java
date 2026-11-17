@@ -11,8 +11,11 @@ import android.content.pm.ServiceInfo;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
+import android.net.Uri;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
@@ -23,6 +26,9 @@ import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.analytics.AnalyticsListener;
+import androidx.media3.exoplayer.source.LoadEventInfo;
+import androidx.media3.exoplayer.source.MediaLoadData;
 import androidx.media3.exoplayer.hls.HlsMediaSource;
 import androidx.media3.exoplayer.dash.DashMediaSource;
 import androidx.media3.exoplayer.source.ProgressiveMediaSource;
@@ -31,6 +37,9 @@ import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.datasource.HttpDataSource;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
@@ -67,14 +76,29 @@ public final class AudioPlaybackService extends Service {
         void onPlaybackStateChanged(boolean playing, String message);
         void onLiveProgramDateTime(long timestampMs);
         void onHlsDiagnostics(String diagnostic);
+        void onPlaybackDiagnostic(String stage, String details);
     }
 
     public final class LocalBinder extends Binder {
         public AudioPlaybackService getService() { return AudioPlaybackService.this; }
     }
 
+    public String getPlaybackDiagnosticSnapshot() {
+        synchronized (playbackDiagnosticLog) { return playbackDiagnosticLog.toString(); }
+    }
+
     private final IBinder binder = new LocalBinder();
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private HandlerThread diagnosticThread;
+    private Handler diagnosticIoHandler;
+    private static final String DIAGNOSTIC_FILE = "radio-kp-playback-diagnostics.log";
+    private static final int MAX_DIAGNOSTIC_CHARS = 60000;
+    private final StringBuilder playbackDiagnosticLog = new StringBuilder(16384);
+    private long lastWatchdogPositionMs = -1L;
+    private long lastPositionAdvanceElapsedMs = 0L;
+    private long lastHealthSampleElapsedMs = 0L;
+    private boolean positionStallReported = false;
+    private boolean audioPositionAdvancingLogged = false;
 
     private ExoPlayer player;
     private DefaultTrackSelector trackSelector;
@@ -110,12 +134,25 @@ public final class AudioPlaybackService extends Service {
 
     private final Runnable connectionTimeout = () -> {
         if (player != null && !currentUrl.isEmpty() && player.getPlaybackState() == Player.STATE_BUFFERING) {
+            logDiagnostic("CONNECTION_TIMEOUT", "BUFFERING дольше 35 секунд · " + playbackSnapshot());
             handlePlaybackFailure("источник слишком долго не отвечает");
+        }
+    };
+
+    private final Runnable playbackWatchdog = new Runnable() {
+        @Override public void run() {
+            inspectPlaybackHealth();
+            if (!currentUrl.isEmpty()) handler.postDelayed(this, 10000L);
         }
     };
 
     @Override public void onCreate() {
         super.onCreate();
+        diagnosticThread = new HandlerThread("RadioKp-Diagnostics");
+        diagnosticThread.start();
+        diagnosticIoHandler = new Handler(diagnosticThread.getLooper());
+        loadPlaybackDiagnosticFile();
+        logDiagnostic("SERVICE", "diagnostic logger ready · Media3 player service created");
         createNotificationChannel();
         trackSelector = new DefaultTrackSelector(this);
         applyTrackSelectionParameters();
@@ -130,26 +167,76 @@ public final class AudioPlaybackService extends Service {
         player.setHandleAudioBecomingNoisy(true);
         player.addListener(new Player.Listener() {
             @Override public void onIsPlayingChanged(boolean isPlaying) {
+                logDiagnostic("PLAYER_PLAYING", "isPlaying=" + isPlaying + " · " + playbackSnapshot());
                 updateNotification();
                 notifyListener(isPlaying, playbackStatusMessage(isPlaying));
             }
 
             @Override public void onPlaybackStateChanged(int state) {
                 if (state == Player.STATE_BUFFERING) {
+                    logDiagnostic("PLAYER_STATE", "state=BUFFERING · " + playbackSnapshot());
+                    // Re-arm the timeout on every later stall, not only on initial prepare().
+                    handler.removeCallbacks(connectionTimeout);
+                    handler.postDelayed(connectionTimeout, 35000L);
+                    lastWatchdogPositionMs = -1L;
+                    lastPositionAdvanceElapsedMs = SystemClock.elapsedRealtime();
+                    positionStallReported = false;
                     notifyListener(false, "Подключение к " + currentSourceName + "…");
                 } else if (state == Player.STATE_READY) {
                     handler.removeCallbacks(connectionTimeout);
+                    lastWatchdogPositionMs = -1L;
+                    lastPositionAdvanceElapsedMs = SystemClock.elapsedRealtime();
+                    positionStallReported = false;
+                    logDiagnostic("PLAYER_STATE", "state=READY · " + playbackSnapshot());
                     // Reset retry budget after every successful reconnect, so a long live programme can recover again later.
                     if (currentIsMp3) radioReconnectAttempts = 0;
                     notifyListener(player.isPlaying(), playbackStatusMessage(player.isPlaying()));
                 } else if (state == Player.STATE_ENDED) {
+                    logDiagnostic("PLAYER_STATE", "state=ENDED · " + playbackSnapshot());
                     handlePlaybackFailure("поток завершился");
+                } else if (state == Player.STATE_IDLE) {
+                    logDiagnostic("PLAYER_STATE", "state=IDLE · " + playbackSnapshot());
                 }
                 updateNotification();
             }
 
             @Override public void onPlayerError(PlaybackException error) {
-                handlePlaybackFailure(describePlaybackError(error));
+                String detail = describePlaybackError(error);
+                logDiagnostic("PLAYER_ERROR", detail + " · " + playbackSnapshot());
+                handlePlaybackFailure(detail);
+            }
+        });
+
+        player.addAnalyticsListener(new AnalyticsListener() {
+            @Override public void onLoadStarted(EventTime eventTime, LoadEventInfo info, MediaLoadData data) {
+                logLoadEvent("LOAD_START", info, data, null);
+            }
+
+            @Override public void onLoadCompleted(EventTime eventTime, LoadEventInfo info, MediaLoadData data) {
+                logLoadEvent("LOAD_OK", info, data, null);
+            }
+
+            @Override public void onLoadCanceled(EventTime eventTime, LoadEventInfo info, MediaLoadData data) {
+                logLoadEvent("LOAD_CANCEL", info, data, null);
+            }
+
+            @Override public void onLoadError(EventTime eventTime, LoadEventInfo info, MediaLoadData data,
+                                              java.io.IOException error, boolean wasCanceled) {
+                logLoadEvent(wasCanceled ? "LOAD_CANCEL_ERROR" : "LOAD_ERROR", info, data, error);
+            }
+
+            @Override public void onAudioUnderrun(EventTime eventTime, int bufferSize, long bufferSizeMs,
+                                                  long elapsedSinceLastFeedMs) {
+                logDiagnostic("AUDIO_UNDERRUN", "bufferBytes=" + bufferSize + " · bufferMs=" + bufferSizeMs
+                        + " · elapsedSinceLastFeedMs=" + elapsedSinceLastFeedMs + " · " + playbackSnapshot());
+            }
+
+            @Override public void onAudioPositionAdvancing(EventTime eventTime, long playoutStartSystemTimeMs) {
+                if (!audioPositionAdvancingLogged) {
+                    audioPositionAdvancingLogged = true;
+                    logDiagnostic("AUDIO_OUTPUT", "audio sink position advancing · playoutStartSystemTimeMs="
+                            + playoutStartSystemTimeMs + " · " + playbackSnapshot());
+                }
             }
         });
     }
@@ -160,6 +247,12 @@ public final class AudioPlaybackService extends Service {
         if (intent == null) return START_NOT_STICKY;
         String action = intent.getAction();
         if (ACTION_PLAY.equals(action)) {
+            audioPositionAdvancingLogged = false;
+            lastWatchdogPositionMs = -1L;
+            lastPositionAdvanceElapsedMs = SystemClock.elapsedRealtime();
+            positionStallReported = false;
+            logDiagnostic("PLAY_REQUEST", "source=" + String.valueOf(intent.getStringExtra(EXTRA_SOURCE_NAME))
+                    + " · new playback request");
             String url = intent.getStringExtra(EXTRA_URL);
             String referer = intent.getStringExtra(EXTRA_REFERER);
             String sourceName = intent.getStringExtra(EXTRA_SOURCE_NAME);
@@ -590,6 +683,169 @@ public final class AudioPlaybackService extends Service {
         notifyListener(false, "Подключение к " + currentSourceName + "…");
         handler.removeCallbacks(connectionTimeout);
         handler.postDelayed(connectionTimeout, 35000L);
+        startPlaybackWatchdog();
+        logDiagnostic("PLAYER_PREPARE", "source=" + currentSourceName + " · " + playbackSnapshot());
+    }
+
+    private void startPlaybackWatchdog() {
+        handler.removeCallbacks(playbackWatchdog);
+        lastWatchdogPositionMs = -1L;
+        lastPositionAdvanceElapsedMs = SystemClock.elapsedRealtime();
+        lastHealthSampleElapsedMs = 0L;
+        positionStallReported = false;
+        handler.postDelayed(playbackWatchdog, 10000L);
+    }
+
+    private void inspectPlaybackHealth() {
+        if (player == null || currentUrl.isEmpty()) return;
+        long now = SystemClock.elapsedRealtime();
+        int state = player.getPlaybackState();
+        boolean playWhenReady = player.getPlayWhenReady();
+        boolean isPlaying = player.isPlaying();
+        long position = player.getCurrentPosition();
+        long buffered = player.getBufferedPosition();
+
+        if (state == Player.STATE_READY && playWhenReady) {
+            if (lastWatchdogPositionMs < 0L || position > lastWatchdogPositionMs + 150L
+                    || position + 1000L < lastWatchdogPositionMs) {
+                lastWatchdogPositionMs = position;
+                lastPositionAdvanceElapsedMs = now;
+                positionStallReported = false;
+            } else if (isPlaying && !positionStallReported
+                    && now - lastPositionAdvanceElapsedMs >= 25000L) {
+                positionStallReported = true;
+                logDiagnostic("WATCHDOG_POSITION_STALLED",
+                        "isPlaying=true · playWhenReady=true · no position advance for "
+                                + (now - lastPositionAdvanceElapsedMs) + "ms · " + playbackSnapshot());
+            }
+
+            if (lastHealthSampleElapsedMs == 0L || now - lastHealthSampleElapsedMs >= 30000L) {
+                lastHealthSampleElapsedMs = now;
+                logDiagnostic("WATCHDOG_SAMPLE", "state=READY · isPlaying=" + isPlaying
+                        + " · playWhenReady=" + playWhenReady + " · positionMs=" + position
+                        + " · bufferedMs=" + buffered + " · " + playbackSnapshot());
+            }
+        } else {
+            lastWatchdogPositionMs = -1L;
+            lastPositionAdvanceElapsedMs = now;
+            positionStallReported = false;
+            if (state == Player.STATE_BUFFERING && lastHealthSampleElapsedMs == 0L) {
+                logDiagnostic("WATCHDOG_SAMPLE", "state=BUFFERING · " + playbackSnapshot());
+            }
+        }
+    }
+
+    private String playbackSnapshot() {
+        if (player == null) return "player=null";
+        return "state=" + playbackStateName(player.getPlaybackState())
+                + " · isPlaying=" + player.isPlaying()
+                + " · playWhenReady=" + player.getPlayWhenReady()
+                + " · positionMs=" + player.getCurrentPosition()
+                + " · bufferedMs=" + player.getBufferedPosition();
+    }
+
+    private static String playbackStateName(int state) {
+        if (state == Player.STATE_IDLE) return "IDLE";
+        if (state == Player.STATE_BUFFERING) return "BUFFERING";
+        if (state == Player.STATE_READY) return "READY";
+        if (state == Player.STATE_ENDED) return "ENDED";
+        return "UNKNOWN(" + state + ")";
+    }
+
+    private void logLoadEvent(String stage, LoadEventInfo info, MediaLoadData data, Throwable error) {
+        int trackType = data == null ? C.TRACK_TYPE_UNKNOWN : data.trackType;
+        int dataType = data == null ? -1 : data.dataType;
+        boolean audioTrack = trackType == C.TRACK_TYPE_AUDIO;
+        boolean manifest = dataType == C.DATA_TYPE_MANIFEST;
+        boolean media = dataType == C.DATA_TYPE_MEDIA;
+        if (!audioTrack && !manifest && !(media && !currentIsMp3)) return;
+
+        String mime = data == null || data.trackFormat == null
+                ? "?" : String.valueOf(data.trackFormat.sampleMimeType);
+        String formatId = data == null || data.trackFormat == null
+                ? "?" : String.valueOf(data.trackFormat.id);
+        int bitrate = data == null || data.trackFormat == null
+                ? -1 : data.trackFormat.bitrate;
+        String host = info == null || info.uri == null || info.uri.getHost() == null
+                ? "?" : info.uri.getHost();
+        StringBuilder detail = new StringBuilder("host=").append(host)
+                .append(" · dataType=").append(dataType)
+                .append(" · trackType=").append(trackType)
+                .append(" · mime=").append(mime)
+                .append(" · format=").append(formatId)
+                .append(" · bitrate=").append(bitrate)
+                .append(" · bytes=").append(info == null ? -1 : info.bytesLoaded)
+                .append(" · loadMs=").append(info == null ? -1 : info.loadDurationMs);
+        if (error != null) detail.append(" · error=").append(describeLoadError(error));
+        logDiagnostic(stage, detail.toString());
+    }
+
+    private static String describeLoadError(Throwable error) {
+        StringBuilder result = new StringBuilder();
+        Throwable cause = error;
+        int depth = 0;
+        while (cause != null && depth++ < 5) {
+            if (result.length() > 0) result.append(" <- ");
+            result.append(cause.getClass().getSimpleName());
+            if (cause instanceof HttpDataSource.InvalidResponseCodeException) {
+                result.append("(HTTP ").append(((HttpDataSource.InvalidResponseCodeException) cause).responseCode).append(")");
+            }
+            String message = cause.getMessage();
+            if (message != null && !message.isEmpty()) {
+                result.append(": ").append(message.length() > 180 ? message.substring(0, 180) : message);
+            }
+            cause = cause.getCause();
+        }
+        return result.toString();
+    }
+
+    private void logDiagnostic(String stage, String details) {
+        String stamp = new SimpleDateFormat("HH:mm:ss.SSS", Locale.ROOT).format(new Date());
+        String line = stamp + " | " + stage + " | " + (details == null ? "" : details.replace('\n', ' ').replace('\r', ' ')) + "\n";
+        synchronized (playbackDiagnosticLog) {
+            playbackDiagnosticLog.append(line);
+            if (playbackDiagnosticLog.length() > MAX_DIAGNOSTIC_CHARS) {
+                int trimTo = playbackDiagnosticLog.length() - MAX_DIAGNOSTIC_CHARS;
+                int newline = playbackDiagnosticLog.indexOf("\n", trimTo);
+                playbackDiagnosticLog.delete(0, newline >= 0 ? newline + 1 : trimTo);
+            }
+        }
+        Handler io = diagnosticIoHandler;
+        if (io != null) io.post(() -> appendDiagnosticFile(line));
+        PlaybackStateListener target = listener;
+        if (target != null) handler.post(() -> {
+            if (listener == target) target.onPlaybackDiagnostic(stage, details == null ? "" : details);
+        });
+    }
+
+    private void appendDiagnosticFile(String line) {
+        try {
+            File file = new File(getFilesDir(), DIAGNOSTIC_FILE);
+            if (file.exists() && file.length() > 512L * 1024L) file.delete();
+            try (FileOutputStream output = openFileOutput(DIAGNOSTIC_FILE, MODE_APPEND)) {
+                output.write(line.getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (Exception ignored) { }
+    }
+
+    private void loadPlaybackDiagnosticFile() {
+        File file = new File(getFilesDir(), DIAGNOSTIC_FILE);
+        if (!file.exists() || file.length() <= 0L || file.length() > 512L * 1024L) return;
+        try (FileInputStream input = new FileInputStream(file);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4096];
+            int read;
+            while ((read = input.read(buffer)) != -1) output.write(buffer, 0, read);
+            String existing = new String(output.toByteArray(), StandardCharsets.UTF_8);
+            synchronized (playbackDiagnosticLog) {
+                playbackDiagnosticLog.append(existing);
+                if (playbackDiagnosticLog.length() > MAX_DIAGNOSTIC_CHARS) {
+                    int trimTo = playbackDiagnosticLog.length() - MAX_DIAGNOSTIC_CHARS;
+                    int newline = playbackDiagnosticLog.indexOf("\n", trimTo);
+                    playbackDiagnosticLog.delete(0, newline >= 0 ? newline + 1 : trimTo);
+                }
+            }
+        } catch (Exception ignored) { }
     }
 
     /**
@@ -1075,6 +1331,7 @@ public final class AudioPlaybackService extends Service {
     }
 
     private void handlePlaybackFailure(String reason) {
+        logDiagnostic("PLAYBACK_FAILURE", String.valueOf(reason) + " · " + playbackSnapshot());
         if (!currentIsMp3 && usingOptimizedHls && !fallbackHlsUrl.isEmpty()) {
             String fallback = fallbackHlsUrl;
             usingOptimizedHls = false;
@@ -1108,6 +1365,8 @@ public final class AudioPlaybackService extends Service {
     }
 
     private void failCurrentSource(String reason) {
+        logDiagnostic("SOURCE_FAILURE", String.valueOf(reason) + " · " + playbackSnapshot());
+        handler.removeCallbacks(playbackWatchdog);
         streamGeneration++;
         handler.removeCallbacks(connectionTimeout);
         String message = "SOURCE_ERROR: " + (reason == null ? "stream error" : reason);
@@ -1132,6 +1391,8 @@ public final class AudioPlaybackService extends Service {
     }
 
     private void stopPlaybackAndService() {
+        logDiagnostic("STOP_REQUEST", "user/service stop · " + playbackSnapshot());
+        handler.removeCallbacks(playbackWatchdog);
         streamGeneration++;
         handler.removeCallbacks(connectionTimeout);
         if (player != null) {
@@ -1194,10 +1455,13 @@ public final class AudioPlaybackService extends Service {
     }
 
     @Override public void onDestroy() {
+        logDiagnostic("SERVICE_DESTROY", "service being destroyed · " + playbackSnapshot());
         streamGeneration++;
         handler.removeCallbacks(connectionTimeout);
+        handler.removeCallbacks(playbackWatchdog);
         if (player != null) player.release();
         player = null;
+        if (diagnosticThread != null) diagnosticThread.quitSafely();
         super.onDestroy();
     }
 }
