@@ -7,6 +7,9 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.media.AudioManager;
+import android.media.AudioDeviceCallback;
+import android.media.AudioDeviceInfo;
 import android.content.pm.ServiceInfo;
 import android.os.Binder;
 import android.os.Build;
@@ -25,6 +28,7 @@ import androidx.media3.common.MediaItem;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
+import androidx.media3.common.Timeline;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.analytics.AnalyticsListener;
 import androidx.media3.exoplayer.source.LoadEventInfo;
@@ -99,6 +103,16 @@ public final class AudioPlaybackService extends Service {
     private long lastHealthSampleElapsedMs = 0L;
     private boolean positionStallReported = false;
     private boolean audioPositionAdvancingLogged = false;
+    private long lastAudioSegmentElapsedMs = 0L;
+    private long lastManifestElapsedMs = 0L;
+    private long lastAudioMediaStartMs = C.TIME_UNSET;
+    private long lastAudioMediaEndMs = C.TIME_UNSET;
+    private boolean segmentGapLogged = false;
+    private boolean dashPlayback = false;
+    private long lastComparablePositionMs = C.TIME_UNSET;
+    private long lastWindowStartMs = C.TIME_UNSET;
+    private AudioManager audioManager;
+    private AudioDeviceCallback audioDeviceCallback;
 
     private ExoPlayer player;
     private DefaultTrackSelector trackSelector;
@@ -165,7 +179,12 @@ public final class AudioPlaybackService extends Service {
                 .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH)
                 .build(), true);
         player.setHandleAudioBecomingNoisy(true);
+        registerAudioDeviceDiagnostics();
         player.addListener(new Player.Listener() {
+            @Override public void onTimelineChanged(Timeline timeline, int reason) {
+                logDiagnostic("TIMELINE", "reason=" + reason + " · " + timelineSnapshot());
+            }
+
             @Override public void onIsPlayingChanged(boolean isPlaying) {
                 logDiagnostic("PLAYER_PLAYING", "isPlaying=" + isPlaying + " · " + playbackSnapshot());
                 updateNotification();
@@ -179,6 +198,8 @@ public final class AudioPlaybackService extends Service {
                     handler.removeCallbacks(connectionTimeout);
                     handler.postDelayed(connectionTimeout, 35000L);
                     lastWatchdogPositionMs = -1L;
+                    lastComparablePositionMs = C.TIME_UNSET;
+                    lastWindowStartMs = C.TIME_UNSET;
                     lastPositionAdvanceElapsedMs = SystemClock.elapsedRealtime();
                     positionStallReported = false;
                     notifyListener(false, "Подключение к " + currentSourceName + "…");
@@ -213,6 +234,14 @@ public final class AudioPlaybackService extends Service {
             }
 
             @Override public void onLoadCompleted(EventTime eventTime, LoadEventInfo info, MediaLoadData data) {
+                long now = SystemClock.elapsedRealtime();
+                if (data != null && data.dataType == C.DATA_TYPE_MANIFEST) lastManifestElapsedMs = now;
+                if (data != null && data.dataType == C.DATA_TYPE_MEDIA && data.trackType == C.TRACK_TYPE_AUDIO) {
+                    lastAudioSegmentElapsedMs = now;
+                    lastAudioMediaStartMs = data.mediaStartTimeMs;
+                    lastAudioMediaEndMs = data.mediaEndTimeMs;
+                    segmentGapLogged = false;
+                }
                 logLoadEvent("LOAD_OK", info, data, null);
             }
 
@@ -228,7 +257,26 @@ public final class AudioPlaybackService extends Service {
             @Override public void onAudioUnderrun(EventTime eventTime, int bufferSize, long bufferSizeMs,
                                                   long elapsedSinceLastFeedMs) {
                 logDiagnostic("AUDIO_UNDERRUN", "bufferBytes=" + bufferSize + " · bufferMs=" + bufferSizeMs
-                        + " · elapsedSinceLastFeedMs=" + elapsedSinceLastFeedMs + " · " + playbackSnapshot());
+                        + " · elapsedSinceLastFeedMs=" + elapsedSinceLastFeedMs + " · " + playbackSnapshot()
+                        + " · " + audioDeviceSnapshot());
+            }
+
+            @Override public void onAudioSinkError(EventTime eventTime, Exception error) {
+                logDiagnostic("AUDIO_SINK_ERROR", error.getClass().getSimpleName() + ": "
+                        + String.valueOf(error.getMessage()) + " · " + audioDeviceSnapshot());
+            }
+
+            @Override public void onAudioCodecError(EventTime eventTime, Exception error) {
+                logDiagnostic("AUDIO_CODEC_ERROR", error.getClass().getSimpleName() + ": "
+                        + String.valueOf(error.getMessage()));
+            }
+
+            @Override public void onAudioInputFormatChanged(EventTime eventTime,
+                    androidx.media3.common.Format format,
+                    androidx.media3.exoplayer.DecoderReuseEvaluation reuseEvaluation) {
+                logDiagnostic("AUDIO_FORMAT", "mime=" + format.sampleMimeType + " · codecs=" + format.codecs
+                        + " · sampleRate=" + format.sampleRate + " · channels=" + format.channelCount
+                        + " · bitrate=" + format.bitrate);
             }
 
             @Override public void onAudioPositionAdvancing(EventTime eventTime, long playoutStartSystemTimeMs) {
@@ -391,6 +439,7 @@ public final class AudioPlaybackService extends Service {
     private void startProgressivePlayback(String url, int generation) {
         try {
             if (generation != streamGeneration || player == null) return;
+            dashPlayback = false;
             DefaultHttpDataSource.Factory httpFactory = new DefaultHttpDataSource.Factory()
                     .setUserAgent(USER_AGENT)
                     .setAllowCrossProtocolRedirects(true)
@@ -406,6 +455,12 @@ public final class AudioPlaybackService extends Service {
     private void startDashPlayback(String url, int generation) {
         try {
             if (generation != streamGeneration || player == null) return;
+            dashPlayback = true;
+            lastAudioSegmentElapsedMs = 0L;
+            lastManifestElapsedMs = 0L;
+            lastAudioMediaStartMs = C.TIME_UNSET;
+            lastAudioMediaEndMs = C.TIME_UNSET;
+            segmentGapLogged = false;
             DefaultHttpDataSource.Factory httpFactory = new DefaultHttpDataSource.Factory()
                     .setUserAgent(USER_AGENT)
                     .setAllowCrossProtocolRedirects(true)
@@ -421,6 +476,7 @@ public final class AudioPlaybackService extends Service {
     private void startHlsPlayback(String url, int generation) {
         try {
             if (generation != streamGeneration || player == null) return;
+            dashPlayback = false;
             DefaultHttpDataSource.Factory httpFactory = new DefaultHttpDataSource.Factory()
                     .setUserAgent(USER_AGENT)
                     .setAllowCrossProtocolRedirects(true)
@@ -704,35 +760,126 @@ public final class AudioPlaybackService extends Service {
         boolean isPlaying = player.isPlaying();
         long position = player.getCurrentPosition();
         long buffered = player.getBufferedPosition();
+        long windowStart = currentWindowStartMs();
+        long comparable = windowStart == C.TIME_UNSET ? position : windowStart + position;
 
         if (state == Player.STATE_READY && playWhenReady) {
-            if (lastWatchdogPositionMs < 0L || position > lastWatchdogPositionMs + 150L
-                    || position + 1000L < lastWatchdogPositionMs) {
+            if (lastComparablePositionMs == C.TIME_UNSET) {
+                lastComparablePositionMs = comparable;
+                lastWindowStartMs = windowStart;
+                lastPositionAdvanceElapsedMs = now;
+            } else if (comparable > lastComparablePositionMs + 150L) {
+                lastComparablePositionMs = comparable;
+                lastWindowStartMs = windowStart;
                 lastWatchdogPositionMs = position;
+                lastPositionAdvanceElapsedMs = now;
+                positionStallReported = false;
+            } else if (windowStart == C.TIME_UNSET && position < lastWatchdogPositionMs - 1500L) {
+                logDiagnostic("WATCHDOG_WINDOW_REBASE", "raw position moved backwards; reset baseline"
+                        + " · previous=" + lastWatchdogPositionMs + " · current=" + position
+                        + " · " + timelineSnapshot());
+                lastComparablePositionMs = position;
+                lastWatchdogPositionMs = position;
+                lastWindowStartMs = windowStart;
                 lastPositionAdvanceElapsedMs = now;
                 positionStallReported = false;
             } else if (isPlaying && !positionStallReported
                     && now - lastPositionAdvanceElapsedMs >= 25000L) {
                 positionStallReported = true;
                 logDiagnostic("WATCHDOG_POSITION_STALLED",
-                        "isPlaying=true · playWhenReady=true · no position advance for "
-                                + (now - lastPositionAdvanceElapsedMs) + "ms · " + playbackSnapshot());
+                        "no comparable position advance for " + (now - lastPositionAdvanceElapsedMs)
+                                + "ms · " + timelineSnapshot());
             }
-
-            if (lastHealthSampleElapsedMs == 0L || now - lastHealthSampleElapsedMs >= 30000L) {
+            if (dashPlayback && lastAudioSegmentElapsedMs > 0L && lastManifestElapsedMs > 0L
+                    && now - lastAudioSegmentElapsedMs >= 20000L
+                    && now - lastManifestElapsedMs <= 6000L && !segmentGapLogged) {
+                segmentGapLogged = true;
+                logDiagnostic("AUDIO_SEGMENT_GAP",
+                        "lastAudioSegmentAgeMs=" + (now - lastAudioSegmentElapsedMs)
+                                + " · lastManifestAgeMs=" + (now - lastManifestElapsedMs)
+                                + " · lastAudioMediaStartMs=" + lastAudioMediaStartMs
+                                + " · lastAudioMediaEndMs=" + lastAudioMediaEndMs
+                                + " · " + timelineSnapshot() + " · " + audioDeviceSnapshot());
+            }
+            if (lastHealthSampleElapsedMs == 0L || now - lastHealthSampleElapsedMs >= 15000L) {
                 lastHealthSampleElapsedMs = now;
                 logDiagnostic("WATCHDOG_SAMPLE", "state=READY · isPlaying=" + isPlaying
                         + " · playWhenReady=" + playWhenReady + " · positionMs=" + position
-                        + " · bufferedMs=" + buffered + " · " + playbackSnapshot());
+                        + " · bufferedMs=" + buffered + " · audioSegmentAgeMs="
+                        + (lastAudioSegmentElapsedMs == 0L ? -1L : now-lastAudioSegmentElapsedMs)
+                        + " · manifestAgeMs=" + (lastManifestElapsedMs == 0L ? -1L : now-lastManifestElapsedMs)
+                        + " · " + timelineSnapshot() + " · " + audioDeviceSnapshot());
             }
         } else {
+            lastComparablePositionMs = C.TIME_UNSET;
             lastWatchdogPositionMs = -1L;
+            lastWindowStartMs = C.TIME_UNSET;
             lastPositionAdvanceElapsedMs = now;
             positionStallReported = false;
-            if (state == Player.STATE_BUFFERING && lastHealthSampleElapsedMs == 0L) {
-                logDiagnostic("WATCHDOG_SAMPLE", "state=BUFFERING · " + playbackSnapshot());
+            if (state == Player.STATE_BUFFERING && lastHealthSampleElapsedMs == 0L)
+                logDiagnostic("WATCHDOG_SAMPLE", "state=BUFFERING · " + timelineSnapshot());
+        }
+    }
+
+    private long currentWindowStartMs() {
+        try {
+            Timeline timeline = player.getCurrentTimeline();
+            int index = player.getCurrentMediaItemIndex();
+            if (timeline.isEmpty() || index < 0 || index >= timeline.getWindowCount()) return C.TIME_UNSET;
+            return timeline.getWindow(index, new Timeline.Window()).windowStartTimeMs;
+        } catch (Exception ignored) { return C.TIME_UNSET; }
+    }
+
+    private String timelineSnapshot() {
+        try {
+            Timeline timeline = player.getCurrentTimeline();
+            int index = player.getCurrentMediaItemIndex();
+            if (timeline.isEmpty() || index < 0 || index >= timeline.getWindowCount())
+                return "timelineEmpty · positionMs=" + player.getCurrentPosition();
+            Timeline.Window window = timeline.getWindow(index, new Timeline.Window());
+            long pos = player.getCurrentPosition();
+            long absolute = window.windowStartTimeMs == C.TIME_UNSET ? C.TIME_UNSET : window.windowStartTimeMs + pos;
+            return "isLive=" + window.isLive() + " · isDynamic=" + window.isDynamic
+                    + " · windowStartTimeMs=" + window.windowStartTimeMs
+                    + " · presentationStartTimeMs=" + window.presentationStartTimeMs
+                    + " · elapsedRealtimeEpochOffsetMs=" + window.elapsedRealtimeEpochOffsetMs
+                    + " · positionMs=" + pos + " · absolutePositionMs=" + absolute
+                    + " · liveOffsetMs=" + player.getCurrentLiveOffset()
+                    + " · bufferedMs=" + player.getBufferedPosition();
+        } catch (Exception e) { return "timelineError=" + e.getClass().getSimpleName(); }
+    }
+
+    private void registerAudioDeviceDiagnostics() {
+        audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
+        if (audioManager == null) return;
+        if (Build.VERSION.SDK_INT >= 23) {
+            audioDeviceCallback = new AudioDeviceCallback() {
+                @Override public void onAudioDevicesAdded(AudioDeviceInfo[] devices) {
+                    logDiagnostic("AUDIO_DEVICES_ADDED", audioDeviceSnapshot());
+                }
+                @Override public void onAudioDevicesRemoved(AudioDeviceInfo[] devices) {
+                    logDiagnostic("AUDIO_DEVICES_REMOVED", audioDeviceSnapshot());
+                }
+            };
+            audioManager.registerAudioDeviceCallback(audioDeviceCallback, handler);
+        }
+        logDiagnostic("AUDIO_ROUTE", audioDeviceSnapshot());
+    }
+
+    private String audioDeviceSnapshot() {
+        if (audioManager == null) return "AudioManager=null";
+        StringBuilder result = new StringBuilder("musicActive=").append(audioManager.isMusicActive())
+                .append(" · musicVolume=").append(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC))
+                .append("/").append(audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC));
+        if (Build.VERSION.SDK_INT >= 23) {
+            AudioDeviceInfo[] devices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS);
+            result.append(" · outputs=");
+            for (int i=0; i<devices.length; i++) {
+                if (i>0) result.append(",");
+                result.append(devices[i].getType()).append("#").append(devices[i].getId());
             }
         }
+        return result.toString();
     }
 
     private String playbackSnapshot() {
@@ -774,6 +921,8 @@ public final class AudioPlaybackService extends Service {
                 .append(" · mime=").append(mime)
                 .append(" · format=").append(formatId)
                 .append(" · bitrate=").append(bitrate)
+                .append(" · mediaStartMs=").append(data == null ? C.TIME_UNSET : data.mediaStartTimeMs)
+                .append(" · mediaEndMs=").append(data == null ? C.TIME_UNSET : data.mediaEndTimeMs)
                 .append(" · bytes=").append(info == null ? -1 : info.bytesLoaded)
                 .append(" · loadMs=").append(info == null ? -1 : info.loadDurationMs);
         if (error != null) detail.append(" · error=").append(describeLoadError(error));
@@ -1459,6 +1608,9 @@ public final class AudioPlaybackService extends Service {
         streamGeneration++;
         handler.removeCallbacks(connectionTimeout);
         handler.removeCallbacks(playbackWatchdog);
+        if (audioManager != null && audioDeviceCallback != null && Build.VERSION.SDK_INT >= 23) {
+            try { audioManager.unregisterAudioDeviceCallback(audioDeviceCallback); } catch (Exception ignored) { }
+        }
         if (player != null) player.release();
         player = null;
         if (diagnosticThread != null) diagnosticThread.quitSafely();
