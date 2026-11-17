@@ -213,7 +213,9 @@ public final class AudioPlaybackService extends Service {
                     if (currentIsMp3) radioReconnectAttempts = 0;
                     notifyListener(player.isPlaying(), playbackStatusMessage(player.isPlaying()));
                 } else if (state == Player.STATE_ENDED) {
-                    logDiagnostic("PLAYER_STATE", "state=ENDED · " + playbackSnapshot());
+                    logDiagnostic("PLAYER_STATE", "state=ENDED · " + playbackSnapshot()
+                            + " · " + timelineSnapshot() + " · source=" + currentSourceName
+                            + " · urlHost=" + safeHost(currentUrl));
                     handlePlaybackFailure("поток завершился");
                 } else if (state == Player.STATE_IDLE) {
                     logDiagnostic("PLAYER_STATE", "state=IDLE · " + playbackSnapshot());
@@ -619,6 +621,9 @@ public final class AudioPlaybackService extends Service {
                 targetDuration = line.substring(line.indexOf(':') + 1).trim();
             }
         }
+        boolean endList = manifest.contains("#EXT-X-ENDLIST");
+        boolean eventPlaylist = manifest.contains("#EXT-X-PLAYLIST-TYPE:EVENT");
+        boolean vodPlaylist = manifest.contains("#EXT-X-PLAYLIST-TYPE:VOD");
         StringBuilder out = new StringBuilder();
         if (!variants.isEmpty()) {
             out.append("HLS_MASTER variants=").append(variants.size())
@@ -629,6 +634,8 @@ public final class AudioPlaybackService extends Service {
         } else {
             out.append("HLS_MEDIA segments=").append(segments)
                     .append(" targetDuration=").append(targetDuration == null ? "?" : targetDuration)
+                    .append(" endList=").append(endList)
+                    .append(" playlistType=").append(vodPlaylist ? "VOD" : (eventPlaylist ? "EVENT" : "unspecified"))
                     .append(" · в этом URL нет master-таблицы вариантов и внешних аудиодорожек");
         }
         return out.toString();
@@ -887,8 +894,18 @@ public final class AudioPlaybackService extends Service {
         return "state=" + playbackStateName(player.getPlaybackState())
                 + " · isPlaying=" + player.isPlaying()
                 + " · playWhenReady=" + player.getPlayWhenReady()
+                + " · mediaItemCount=" + player.getMediaItemCount()
+                + " · currentMediaItemIndex=" + player.getCurrentMediaItemIndex()
+                + " · durationMs=" + player.getDuration()
                 + " · positionMs=" + player.getCurrentPosition()
-                + " · bufferedMs=" + player.getBufferedPosition();
+                + " · bufferedMs=" + player.getBufferedPosition()
+                + " · isCurrentMediaItemLive=" + player.isCurrentMediaItemLive()
+                + " · isCurrentMediaItemDynamic=" + player.isCurrentMediaItemDynamic();
+    }
+
+    private static String safeHost(String rawUrl) {
+        try { return new URL(rawUrl).getHost(); }
+        catch (Exception ignored) { return "?"; }
     }
 
     private static String playbackStateName(int state) {
