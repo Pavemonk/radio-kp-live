@@ -10,8 +10,8 @@ android {
         applicationId 'ru.radiokp.voennoerevue.vkdebug'
         minSdk 23
         targetSdk 35
-        versionCode 44
-        versionName '0.7.37-audio-live-window-diagnostics'
+        versionCode 45
+        versionName '0.7.38-diagnostics-txt-export'
     }
 }
 
