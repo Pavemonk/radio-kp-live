@@ -30,6 +30,8 @@ import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.Timeline;
 import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.DecoderCounters;
+import androidx.media3.exoplayer.audio.AudioSink;
 import androidx.media3.exoplayer.analytics.AnalyticsListener;
 import androidx.media3.exoplayer.source.LoadEventInfo;
 import androidx.media3.exoplayer.source.MediaLoadData;
@@ -125,6 +127,14 @@ public final class AudioPlaybackService extends Service {
     private long lastWindowStartMs = C.TIME_UNSET;
     private AudioManager audioManager;
     private AudioDeviceCallback audioDeviceCallback;
+    private int lastAudioSessionId = -1;
+    private int audioPositionAdvancingCount = 0;
+    private boolean audioRendererEnabled = false;
+    private String lastAudioDecoderName = "unknown";
+    private long lastAudioDecoderInitDurationMs = -1L;
+    private long lastAudioDecoderInitializedElapsedMs = -1L;
+    private String lastAudioInputFormat = "unknown";
+    private String lastAudioTrackConfig = "not initialized";
 
     private ExoPlayer player;
     private DefaultTrackSelector trackSelector;
@@ -268,37 +278,91 @@ public final class AudioPlaybackService extends Service {
                 logLoadEvent(wasCanceled ? "LOAD_CANCEL_ERROR" : "LOAD_ERROR", info, data, error);
             }
 
+            @Override public void onAudioEnabled(EventTime eventTime, DecoderCounters decoderCounters) {
+                audioRendererEnabled = true;
+                logDiagnostic("AUDIO_RENDERER_ENABLED",
+                        decoderCountersSnapshot(decoderCounters) + " · " + audioPipelineSnapshot());
+            }
+
+            @Override public void onAudioDisabled(EventTime eventTime, DecoderCounters decoderCounters) {
+                audioRendererEnabled = false;
+                logDiagnostic("AUDIO_RENDERER_DISABLED",
+                        decoderCountersSnapshot(decoderCounters) + " · " + audioPipelineSnapshot());
+            }
+
+            @Override public void onAudioDecoderInitialized(EventTime eventTime, String decoderName,
+                    long initializedTimestampMs, long initializationDurationMs) {
+                lastAudioDecoderName = decoderName == null ? "unknown" : decoderName;
+                lastAudioDecoderInitDurationMs = initializationDurationMs;
+                lastAudioDecoderInitializedElapsedMs = SystemClock.elapsedRealtime();
+                logDiagnostic("AUDIO_DECODER_INITIALIZED",
+                        "name=" + lastAudioDecoderName + " · initializedTimestampMs=" + initializedTimestampMs
+                                + " · initDurationMs=" + initializationDurationMs
+                                + " · " + audioPipelineSnapshot());
+            }
+
+            @Override public void onAudioDecoderReleased(EventTime eventTime, String decoderName) {
+                logDiagnostic("AUDIO_DECODER_RELEASED",
+                        "name=" + String.valueOf(decoderName) + " · " + audioPipelineSnapshot());
+                if (decoderName != null && decoderName.equals(lastAudioDecoderName))
+                    lastAudioDecoderName = decoderName + "(released)";
+            }
+
+            @Override public void onAudioTrackInitialized(EventTime eventTime,
+                    AudioSink.AudioTrackConfig audioTrackConfig) {
+                lastAudioTrackConfig = audioTrackConfigSnapshot(audioTrackConfig);
+                logDiagnostic("AUDIO_TRACK_INITIALIZED",
+                        lastAudioTrackConfig + " · " + audioPipelineSnapshot());
+            }
+
+            @Override public void onAudioTrackReleased(EventTime eventTime,
+                    AudioSink.AudioTrackConfig audioTrackConfig) {
+                String releasedConfig = audioTrackConfigSnapshot(audioTrackConfig);
+                logDiagnostic("AUDIO_TRACK_RELEASED",
+                        releasedConfig + " · " + audioPipelineSnapshot());
+                lastAudioTrackConfig = "released: " + releasedConfig;
+            }
+
+            @Override public void onAudioSessionIdChanged(EventTime eventTime, int audioSessionId) {
+                lastAudioSessionId = audioSessionId;
+                logDiagnostic("AUDIO_SESSION_ID",
+                        "sessionId=" + audioSessionId + " · " + audioPipelineSnapshot());
+            }
+
             @Override public void onAudioUnderrun(EventTime eventTime, int bufferSize, long bufferSizeMs,
                                                   long elapsedSinceLastFeedMs) {
                 logDiagnostic("AUDIO_UNDERRUN", "bufferBytes=" + bufferSize + " · bufferMs=" + bufferSizeMs
-                        + " · elapsedSinceLastFeedMs=" + elapsedSinceLastFeedMs + " · " + playbackSnapshot()
-                        + " · " + audioDeviceSnapshot());
+                        + " · elapsedSinceLastFeedMs=" + elapsedSinceLastFeedMs
+                        + " · eventPositionMs=" + eventTime.eventPlaybackPositionMs
+                        + " · " + playbackSnapshot() + " · " + audioPipelineSnapshot());
             }
 
             @Override public void onAudioSinkError(EventTime eventTime, Exception error) {
                 logDiagnostic("AUDIO_SINK_ERROR", error.getClass().getSimpleName() + ": "
-                        + String.valueOf(error.getMessage()) + " · " + audioDeviceSnapshot());
+                        + String.valueOf(error.getMessage()) + " · " + audioPipelineSnapshot());
             }
 
             @Override public void onAudioCodecError(EventTime eventTime, Exception error) {
                 logDiagnostic("AUDIO_CODEC_ERROR", error.getClass().getSimpleName() + ": "
-                        + String.valueOf(error.getMessage()));
+                        + String.valueOf(error.getMessage()) + " · " + audioPipelineSnapshot());
             }
 
             @Override public void onAudioInputFormatChanged(EventTime eventTime,
                     androidx.media3.common.Format format,
                     androidx.media3.exoplayer.DecoderReuseEvaluation reuseEvaluation) {
-                logDiagnostic("AUDIO_FORMAT", "mime=" + format.sampleMimeType + " · codecs=" + format.codecs
-                        + " · sampleRate=" + format.sampleRate + " · channels=" + format.channelCount
-                        + " · bitrate=" + format.bitrate);
+                lastAudioInputFormat = "mime=" + format.sampleMimeType + ",codecs=" + format.codecs
+                        + ",sampleRate=" + format.sampleRate + ",channels=" + format.channelCount
+                        + ",pcmEncoding=" + format.pcmEncoding + ",bitrate=" + format.bitrate;
+                logDiagnostic("AUDIO_FORMAT", lastAudioInputFormat + " · " + audioPipelineSnapshot());
             }
 
             @Override public void onAudioPositionAdvancing(EventTime eventTime, long playoutStartSystemTimeMs) {
-                if (!audioPositionAdvancingLogged) {
-                    audioPositionAdvancingLogged = true;
-                    logDiagnostic("AUDIO_OUTPUT", "audio sink position advancing · playoutStartSystemTimeMs="
-                            + playoutStartSystemTimeMs + " · " + playbackSnapshot());
-                }
+                audioPositionAdvancingLogged = true;
+                audioPositionAdvancingCount++;
+                logDiagnostic("AUDIO_OUTPUT_POSITION_ADVANCING",
+                        "count=" + audioPositionAdvancingCount
+                                + " · playoutStartSystemTimeMs=" + playoutStartSystemTimeMs
+                                + " · " + audioPipelineSnapshot());
             }
         });
     }
@@ -310,6 +374,14 @@ public final class AudioPlaybackService extends Service {
         String action = intent.getAction();
         if (ACTION_PLAY.equals(action)) {
             audioPositionAdvancingLogged = false;
+            audioPositionAdvancingCount = 0;
+            audioRendererEnabled = false;
+            lastAudioDecoderName = "unknown";
+            lastAudioDecoderInitDurationMs = -1L;
+            lastAudioDecoderInitializedElapsedMs = -1L;
+            lastAudioInputFormat = "unknown";
+            lastAudioTrackConfig = "not initialized";
+            lastAudioSessionId = -1;
             lastWatchdogPositionMs = -1L;
             lastComparablePositionMs = C.TIME_UNSET;
             lastWindowStartMs = C.TIME_UNSET;
@@ -800,7 +872,7 @@ public final class AudioPlaybackService extends Service {
                     logDiagnostic("LIVE_STALL_RECOVERED",
                             "position advanced after recovery stage=" + liveStallRecoveryStage
                                     + " · recoveryElapsedMs=" + (now - liveStallRecoveryStartedElapsedMs)
-                                    + " · " + timelineSnapshot() + " · " + audioDeviceSnapshot());
+                                    + " · " + timelineSnapshot() + " · " + audioPipelineSnapshot());
                     liveStallRecoveryStage = 0;
                     liveStallRecoveryStartedElapsedMs = 0L;
                 }
@@ -848,7 +920,7 @@ public final class AudioPlaybackService extends Service {
                         + " · bufferedMs=" + buffered + " · audioSegmentAgeMs="
                         + (lastAudioSegmentElapsedMs == 0L ? -1L : now-lastAudioSegmentElapsedMs)
                         + " · manifestAgeMs=" + (lastManifestElapsedMs == 0L ? -1L : now-lastManifestElapsedMs)
-                        + " · " + timelineSnapshot() + " · " + audioDeviceSnapshot());
+                        + " · " + timelineSnapshot() + " · " + audioPipelineSnapshot());
             }
         } else {
             lastComparablePositionMs = C.TIME_UNSET;
@@ -899,7 +971,7 @@ public final class AudioPlaybackService extends Service {
                 logDiagnostic("LIVE_STALL_NOT_RECOVERED",
                         "position stalled but fresh stream data is not confirmed · audioAgeMs=" + audioAge
                                 + " · manifestAgeMs=" + manifestAge
-                                + " · " + timelineSnapshot() + " · " + audioDeviceSnapshot());
+                                + " · " + timelineSnapshot() + " · " + audioPipelineSnapshot());
                 liveStallRecoveryDisabled = true;
             }
             return;
@@ -919,14 +991,15 @@ public final class AudioPlaybackService extends Service {
                     "live position frozen while audio segments and manifest continue · audioAgeMs=" + audioAge
                             + " · manifestAgeMs=" + manifestAge
                             + " · " + playbackSnapshot() + " · " + timelineSnapshot()
-                            + " · " + audioDeviceSnapshot());
+                            + " · " + audioPipelineSnapshot());
             try {
                 player.seekToDefaultPosition();
                 player.play();
                 updateNotification();
                 logDiagnostic("LIVE_STALL_RECOVERY_SEEK",
                         "stage=1 · seekToDefaultPosition on the existing live item · "
-                                + playbackSnapshot() + " · " + timelineSnapshot());
+                                + playbackSnapshot() + " · " + timelineSnapshot()
+                                + " · " + audioPipelineSnapshot());
             } catch (Exception error) {
                 logDiagnostic("LIVE_STALL_RECOVERY_SEEK_ERROR",
                         error.getClass().getSimpleName() + ": " + String.valueOf(error.getMessage()));
@@ -943,7 +1016,8 @@ public final class AudioPlaybackService extends Service {
             audioPositionAdvancingLogged = false;
             logDiagnostic("LIVE_STALL_RECOVERY_REPREPARE",
                     "stage=2 · live-edge seek did not restore position; re-prepare same MediaSource"
-                            + " · " + playbackSnapshot() + " · " + timelineSnapshot());
+                            + " · " + playbackSnapshot() + " · " + timelineSnapshot()
+                            + " · " + audioPipelineSnapshot());
             try {
                 // ExoPlayer keeps the current playlist on stop(); prepare() rebuilds its
                 // renderers/loaders without resolving a different stream or CDN URL.
@@ -969,7 +1043,7 @@ public final class AudioPlaybackService extends Service {
             logDiagnostic("LIVE_STALL_RECOVERY_FAILED",
                     "position did not resume after seek and same-source re-prepare; automatic recovery disabled for this play request"
                             + " · " + playbackSnapshot() + " · " + timelineSnapshot()
-                            + " · " + audioDeviceSnapshot());
+                            + " · " + audioPipelineSnapshot());
         }
     }
 
@@ -1012,8 +1086,10 @@ public final class AudioPlaybackService extends Service {
     private String audioDeviceSnapshot() {
         if (audioManager == null) return "AudioManager=null";
         StringBuilder result = new StringBuilder("musicActive=").append(audioManager.isMusicActive())
+                .append(" · audioMode=").append(audioManager.getMode())
                 .append(" · musicVolume=").append(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC))
-                .append("/").append(audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC));
+                .append("/").append(audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC))
+                .append(" · musicMuted=").append(audioManager.isStreamMute(AudioManager.STREAM_MUSIC));
         if (Build.VERSION.SDK_INT >= 23) {
             AudioDeviceInfo[] devices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS);
             result.append(" · outputs=");
@@ -1023,6 +1099,51 @@ public final class AudioPlaybackService extends Service {
             }
         }
         return result.toString();
+    }
+
+    private String audioTrackConfigSnapshot(AudioSink.AudioTrackConfig config) {
+        if (config == null) return "AudioTrackConfig=null";
+        return "encoding=" + config.encoding + " · sampleRate=" + config.sampleRate
+                + " · channelConfig=" + config.channelConfig + " · bufferSize=" + config.bufferSize
+                + " · tunneling=" + config.tunneling + " · offload=" + config.offload;
+    }
+
+    private String decoderCountersSnapshot(DecoderCounters counters) {
+        if (counters == null) return "decoderCounters=null";
+        try {
+            java.lang.reflect.Method ensureUpdated = counters.getClass().getMethod("ensureUpdated");
+            ensureUpdated.invoke(counters);
+        } catch (Exception ignored) { }
+        StringBuilder result = new StringBuilder("decoderCounters{");
+        String[] names = {"decoderInitCount", "decoderReleaseCount", "queuedInputBufferCount",
+                "skippedInputBufferCount", "renderedOutputBufferCount", "skippedOutputBufferCount",
+                "droppedBufferCount", "maxConsecutiveDroppedBufferCount", "droppedToKeyframeCount"};
+        boolean added = false;
+        for (String name : names) {
+            try {
+                java.lang.reflect.Field field = counters.getClass().getField(name);
+                Object value = field.get(counters);
+                if (added) result.append(",");
+                result.append(name).append("=").append(value);
+                added = true;
+            } catch (Exception ignored) { }
+        }
+        if (!added) result.append("fieldsUnavailable");
+        return result.append("}").toString();
+    }
+
+    private String audioPipelineSnapshot() {
+        long decoderAge = lastAudioDecoderInitializedElapsedMs <= 0L
+                ? -1L : SystemClock.elapsedRealtime() - lastAudioDecoderInitializedElapsedMs;
+        return "rendererEnabled=" + audioRendererEnabled
+                + " · decoder=" + lastAudioDecoderName
+                + " · decoderInitDurationMs=" + lastAudioDecoderInitDurationMs
+                + " · decoderAgeMs=" + decoderAge
+                + " · audioSessionId=" + lastAudioSessionId
+                + " · audioTrack={" + lastAudioTrackConfig + "}"
+                + " · inputFormat={" + lastAudioInputFormat + "}"
+                + " · positionAdvancingCount=" + audioPositionAdvancingCount
+                + " · " + audioDeviceSnapshot();
     }
 
     private String playbackSnapshot() {
