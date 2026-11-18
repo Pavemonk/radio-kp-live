@@ -10,8 +10,8 @@ android {
         applicationId 'ru.radiokp.voennoerevue.vkdebug'
         minSdk 23
         targetSdk 35
-        versionCode 46
-        versionName '0.7.39-save-full-log'
+        versionCode 47
+        versionName '0.7.40-live-stall-recovery'
     }
 }
 
