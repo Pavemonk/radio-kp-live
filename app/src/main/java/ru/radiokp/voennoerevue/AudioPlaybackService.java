@@ -138,7 +138,6 @@ public final class AudioPlaybackService extends Service {
     private String lastDecoderCountersSnapshot = "decoderCounters=not yet reported";
     private long diagnosticEventSequence = 0L;
     private long diagnosticSessionStartedElapsedMs = 0L;
-    private static final int MAX_DIAGNOSTIC_CHARS = 120000;
     private static final long MAX_DIAGNOSTIC_FILE_BYTES = 1024L * 1024L;
 
     private ExoPlayer player;
@@ -1116,8 +1115,7 @@ public final class AudioPlaybackService extends Service {
                         .append(",sink=").append(d.isSink())
                         .append(",rates=").append(java.util.Arrays.toString(d.getSampleRates()))
                         .append(",channels=").append(java.util.Arrays.toString(d.getChannelCounts()))
-                        .append(",encodings=").append(java.util.Arrays.toString(d.getEncodings())
-                        .length > 8 ? "many" : java.util.Arrays.toString(d.getEncodings()));
+                        .append(",encodings=").append(intArraySnapshot(d.getEncodings()));
             }
             result.append("]");
         }
