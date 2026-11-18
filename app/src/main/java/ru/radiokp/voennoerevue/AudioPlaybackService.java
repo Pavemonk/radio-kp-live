@@ -135,6 +135,11 @@ public final class AudioPlaybackService extends Service {
     private long lastAudioDecoderInitializedElapsedMs = -1L;
     private String lastAudioInputFormat = "unknown";
     private String lastAudioTrackConfig = "not initialized";
+    private String lastDecoderCountersSnapshot = "decoderCounters=not yet reported";
+    private long diagnosticEventSequence = 0L;
+    private long diagnosticSessionStartedElapsedMs = 0L;
+    private static final int MAX_DIAGNOSTIC_CHARS = 120000;
+    private static final long MAX_DIAGNOSTIC_FILE_BYTES = 1024L * 1024L;
 
     private ExoPlayer player;
     private DefaultTrackSelector trackSelector;
@@ -188,7 +193,7 @@ public final class AudioPlaybackService extends Service {
         diagnosticThread.start();
         diagnosticIoHandler = new Handler(diagnosticThread.getLooper());
         loadPlaybackDiagnosticFile();
-        logDiagnostic("SERVICE", "diagnostic logger ready · Media3 player service created");
+        logDiagnostic("SERVICE", "diagnostic logger ready · Media3 player service created · " + deviceDiagnosticSnapshot());
         createNotificationChannel();
         trackSelector = new DefaultTrackSelector(this);
         applyTrackSelectionParameters();
@@ -214,6 +219,8 @@ public final class AudioPlaybackService extends Service {
             }
 
             @Override public void onPlaybackStateChanged(int state) {
+                logDiagnostic("PLAYER_STATE_TRANSITION", "state=" + playbackStateName(state)
+                        + " · " + playbackSnapshot() + " · " + audioPipelineSnapshot());
                 if (state == Player.STATE_BUFFERING) {
                     logDiagnostic("PLAYER_STATE", "state=BUFFERING · " + playbackSnapshot());
                     // Re-arm the timeout on every later stall, not only on initial prepare().
@@ -280,14 +287,16 @@ public final class AudioPlaybackService extends Service {
 
             @Override public void onAudioEnabled(EventTime eventTime, DecoderCounters decoderCounters) {
                 audioRendererEnabled = true;
+                lastDecoderCountersSnapshot = decoderCountersSnapshot(decoderCounters);
                 logDiagnostic("AUDIO_RENDERER_ENABLED",
-                        decoderCountersSnapshot(decoderCounters) + " · " + audioPipelineSnapshot());
+                        lastDecoderCountersSnapshot + " · " + audioPipelineSnapshot());
             }
 
             @Override public void onAudioDisabled(EventTime eventTime, DecoderCounters decoderCounters) {
                 audioRendererEnabled = false;
+                lastDecoderCountersSnapshot = decoderCountersSnapshot(decoderCounters);
                 logDiagnostic("AUDIO_RENDERER_DISABLED",
-                        decoderCountersSnapshot(decoderCounters) + " · " + audioPipelineSnapshot());
+                        lastDecoderCountersSnapshot + " · " + audioPipelineSnapshot());
             }
 
             @Override public void onAudioDecoderInitialized(EventTime eventTime, String decoderName,
@@ -303,7 +312,8 @@ public final class AudioPlaybackService extends Service {
 
             @Override public void onAudioDecoderReleased(EventTime eventTime, String decoderName) {
                 logDiagnostic("AUDIO_DECODER_RELEASED",
-                        "name=" + String.valueOf(decoderName) + " · " + audioPipelineSnapshot());
+                        "name=" + String.valueOf(decoderName) + " · counters=" + lastDecoderCountersSnapshot
+                                + " · " + audioPipelineSnapshot());
                 if (decoderName != null && decoderName.equals(lastAudioDecoderName))
                     lastAudioDecoderName = decoderName + "(released)";
             }
@@ -334,17 +344,20 @@ public final class AudioPlaybackService extends Service {
                 logDiagnostic("AUDIO_UNDERRUN", "bufferBytes=" + bufferSize + " · bufferMs=" + bufferSizeMs
                         + " · elapsedSinceLastFeedMs=" + elapsedSinceLastFeedMs
                         + " · eventPositionMs=" + eventTime.eventPlaybackPositionMs
+                        + " · sessionElapsedMs=" + (SystemClock.elapsedRealtime() - diagnosticSessionStartedElapsedMs)
                         + " · " + playbackSnapshot() + " · " + audioPipelineSnapshot());
             }
 
             @Override public void onAudioSinkError(EventTime eventTime, Exception error) {
                 logDiagnostic("AUDIO_SINK_ERROR", error.getClass().getSimpleName() + ": "
-                        + String.valueOf(error.getMessage()) + " · " + audioPipelineSnapshot());
+                        + String.valueOf(error.getMessage()) + " · " + playbackSnapshot()
+                        + " · " + audioPipelineSnapshot());
             }
 
             @Override public void onAudioCodecError(EventTime eventTime, Exception error) {
                 logDiagnostic("AUDIO_CODEC_ERROR", error.getClass().getSimpleName() + ": "
-                        + String.valueOf(error.getMessage()) + " · " + audioPipelineSnapshot());
+                        + String.valueOf(error.getMessage()) + " · " + playbackSnapshot()
+                        + " · " + audioPipelineSnapshot());
             }
 
             @Override public void onAudioInputFormatChanged(EventTime eventTime,
@@ -381,6 +394,8 @@ public final class AudioPlaybackService extends Service {
             lastAudioDecoderInitializedElapsedMs = -1L;
             lastAudioInputFormat = "unknown";
             lastAudioTrackConfig = "not initialized";
+            lastDecoderCountersSnapshot = "decoderCounters=reset-for-new-request";
+            diagnosticSessionStartedElapsedMs = SystemClock.elapsedRealtime();
             lastAudioSessionId = -1;
             lastWatchdogPositionMs = -1L;
             lastComparablePositionMs = C.TIME_UNSET;
@@ -392,7 +407,8 @@ public final class AudioPlaybackService extends Service {
             lastLiveStallRecoveryElapsedMs = 0L;
             liveStallRecoveryDisabled = false;
             logDiagnostic("PLAY_REQUEST", "source=" + String.valueOf(intent.getStringExtra(EXTRA_SOURCE_NAME))
-                    + " · new playback request");
+                    + " · new playback request · " + deviceDiagnosticSnapshot()
+                    + " · " + audioDeviceSnapshot());
             String url = intent.getStringExtra(EXTRA_URL);
             String referer = intent.getStringExtra(EXTRA_REFERER);
             String sourceName = intent.getStringExtra(EXTRA_SOURCE_NAME);
@@ -1092,11 +1108,18 @@ public final class AudioPlaybackService extends Service {
                 .append(" · musicMuted=").append(audioManager.isStreamMute(AudioManager.STREAM_MUSIC));
         if (Build.VERSION.SDK_INT >= 23) {
             AudioDeviceInfo[] devices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS);
-            result.append(" · outputs=");
+            result.append(" · outputs=[");
             for (int i=0; i<devices.length; i++) {
-                if (i>0) result.append(",");
-                result.append(devices[i].getType()).append("#").append(devices[i].getId());
+                if (i>0) result.append(";");
+                AudioDeviceInfo d = devices[i];
+                result.append("type=").append(d.getType()).append("#id=").append(d.getId())
+                        .append(",sink=").append(d.isSink())
+                        .append(",rates=").append(java.util.Arrays.toString(d.getSampleRates()))
+                        .append(",channels=").append(java.util.Arrays.toString(d.getChannelCounts()))
+                        .append(",encodings=").append(java.util.Arrays.toString(d.getEncodings())
+                        .length > 8 ? "many" : java.util.Arrays.toString(d.getEncodings()));
             }
+            result.append("]");
         }
         return result.toString();
     }
@@ -1143,12 +1166,23 @@ public final class AudioPlaybackService extends Service {
                 + " · audioTrack={" + lastAudioTrackConfig + "}"
                 + " · inputFormat={" + lastAudioInputFormat + "}"
                 + " · positionAdvancingCount=" + audioPositionAdvancingCount
+                + " · decoderCounters={" + lastDecoderCountersSnapshot + "}"
                 + " · " + audioDeviceSnapshot();
+    }
+
+    private String deviceDiagnosticSnapshot() {
+        return "deviceModel=" + Build.MODEL + " · manufacturer=" + Build.MANUFACTURER
+                + " · device=" + Build.DEVICE + " · androidSdk=" + Build.VERSION.SDK_INT
+                + " · androidRelease=" + Build.VERSION.RELEASE
+                + " · timezone=" + java.util.TimeZone.getDefault().getID()
+                + " · appProcess=" + android.os.Process.myPid();
     }
 
     private String playbackSnapshot() {
         if (player == null) return "player=null";
-        return "state=" + playbackStateName(player.getPlaybackState())
+        return "source=" + currentSourceName + " · generation=" + streamGeneration
+                + " · urlHost=" + safeHost(currentUrl)
+                + " · state=" + playbackStateName(player.getPlaybackState())
                 + " · isPlaying=" + player.isPlaying()
                 + " · playWhenReady=" + player.getPlayWhenReady()
                 + " · mediaItemCount=" + player.getMediaItemCount()
@@ -1223,8 +1257,13 @@ public final class AudioPlaybackService extends Service {
     }
 
     private void logDiagnostic(String stage, String details) {
-        String stamp = new SimpleDateFormat("HH:mm:ss.SSS", Locale.ROOT).format(new Date());
-        String line = stamp + " | " + stage + " | " + (details == null ? "" : details.replace('\n', ' ').replace('\r', ' ')) + "\n";
+        String stamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.ROOT).format(new Date());
+        long elapsed = SystemClock.elapsedRealtime();
+        long seq;
+        synchronized (playbackDiagnosticLog) { seq = ++diagnosticEventSequence; }
+        String line = stamp + " | elapsedMs=" + elapsed + " | event#" + seq + " | source=" + currentSourceName
+                + " | generation=" + streamGeneration + " | " + stage + " | "
+                + (details == null ? "" : details.replace('\n', ' ').replace('\r', ' ')) + "\n";
         synchronized (playbackDiagnosticLog) {
             playbackDiagnosticLog.append(line);
             if (playbackDiagnosticLog.length() > MAX_DIAGNOSTIC_CHARS) {
@@ -1878,7 +1917,8 @@ public final class AudioPlaybackService extends Service {
     }
 
     @Override public void onDestroy() {
-        logDiagnostic("SERVICE_DESTROY", "service being destroyed · " + playbackSnapshot());
+        logDiagnostic("SERVICE_DESTROY", "service being destroyed · " + playbackSnapshot()
+                + " · " + audioPipelineSnapshot() + " · " + deviceDiagnosticSnapshot());
         streamGeneration++;
         handler.removeCallbacks(connectionTimeout);
         handler.removeCallbacks(playbackWatchdog);
