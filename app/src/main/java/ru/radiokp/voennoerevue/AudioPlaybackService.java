@@ -108,6 +108,18 @@ public final class AudioPlaybackService extends Service {
     private long lastAudioMediaStartMs = C.TIME_UNSET;
     private long lastAudioMediaEndMs = C.TIME_UNSET;
     private boolean segmentGapLogged = false;
+    private static final long PLAYBACK_WATCHDOG_INTERVAL_MS = 2500L;
+    private static final long LIVE_POSITION_STALL_MS = 8000L;
+    private static final long LIVE_RECOVERY_SEEK_TIMEOUT_MS = 10000L;
+    private static final long LIVE_RECOVERY_REPREPARE_TIMEOUT_MS = 15000L;
+    private static final long LIVE_RECOVERY_COOLDOWN_MS = 60000L;
+    private static final long RECENT_AUDIO_SEGMENT_MAX_AGE_MS = 12000L;
+    private static final long RECENT_MANIFEST_MAX_AGE_MS = 12000L;
+    // 0 = no recovery in progress; 1 = live-edge seek; 2 = full re-prepare of the same MediaSource.
+    private int liveStallRecoveryStage = 0;
+    private long liveStallRecoveryStartedElapsedMs = 0L;
+    private long lastLiveStallRecoveryElapsedMs = 0L;
+    private boolean liveStallRecoveryDisabled = false;
     private boolean dashPlayback = false;
     private long lastComparablePositionMs = C.TIME_UNSET;
     private long lastWindowStartMs = C.TIME_UNSET;
@@ -156,7 +168,7 @@ public final class AudioPlaybackService extends Service {
     private final Runnable playbackWatchdog = new Runnable() {
         @Override public void run() {
             inspectPlaybackHealth();
-            if (!currentUrl.isEmpty()) handler.postDelayed(this, 10000L);
+            if (!currentUrl.isEmpty()) handler.postDelayed(this, PLAYBACK_WATCHDOG_INTERVAL_MS);
         }
     };
 
@@ -299,8 +311,14 @@ public final class AudioPlaybackService extends Service {
         if (ACTION_PLAY.equals(action)) {
             audioPositionAdvancingLogged = false;
             lastWatchdogPositionMs = -1L;
+            lastComparablePositionMs = C.TIME_UNSET;
+            lastWindowStartMs = C.TIME_UNSET;
             lastPositionAdvanceElapsedMs = SystemClock.elapsedRealtime();
             positionStallReported = false;
+            liveStallRecoveryStage = 0;
+            liveStallRecoveryStartedElapsedMs = 0L;
+            lastLiveStallRecoveryElapsedMs = 0L;
+            liveStallRecoveryDisabled = false;
             logDiagnostic("PLAY_REQUEST", "source=" + String.valueOf(intent.getStringExtra(EXTRA_SOURCE_NAME))
                     + " · new playback request");
             String url = intent.getStringExtra(EXTRA_URL);
@@ -753,10 +771,12 @@ public final class AudioPlaybackService extends Service {
     private void startPlaybackWatchdog() {
         handler.removeCallbacks(playbackWatchdog);
         lastWatchdogPositionMs = -1L;
+        lastComparablePositionMs = C.TIME_UNSET;
+        lastWindowStartMs = C.TIME_UNSET;
         lastPositionAdvanceElapsedMs = SystemClock.elapsedRealtime();
         lastHealthSampleElapsedMs = 0L;
         positionStallReported = false;
-        handler.postDelayed(playbackWatchdog, 10000L);
+        handler.postDelayed(playbackWatchdog, PLAYBACK_WATCHDOG_INTERVAL_MS);
     }
 
     private void inspectPlaybackHealth() {
@@ -776,6 +796,14 @@ public final class AudioPlaybackService extends Service {
                 lastWindowStartMs = windowStart;
                 lastPositionAdvanceElapsedMs = now;
             } else if (comparable > lastComparablePositionMs + 150L) {
+                if (liveStallRecoveryStage != 0) {
+                    logDiagnostic("LIVE_STALL_RECOVERED",
+                            "position advanced after recovery stage=" + liveStallRecoveryStage
+                                    + " · recoveryElapsedMs=" + (now - liveStallRecoveryStartedElapsedMs)
+                                    + " · " + timelineSnapshot() + " · " + audioDeviceSnapshot());
+                    liveStallRecoveryStage = 0;
+                    liveStallRecoveryStartedElapsedMs = 0L;
+                }
                 lastComparablePositionMs = comparable;
                 lastWindowStartMs = windowStart;
                 lastWatchdogPositionMs = position;
@@ -791,11 +819,16 @@ public final class AudioPlaybackService extends Service {
                 lastPositionAdvanceElapsedMs = now;
                 positionStallReported = false;
             } else if (isPlaying && !positionStallReported
-                    && now - lastPositionAdvanceElapsedMs >= 25000L) {
+                    && now - lastPositionAdvanceElapsedMs >= LIVE_POSITION_STALL_MS) {
                 positionStallReported = true;
                 logDiagnostic("WATCHDOG_POSITION_STALLED",
                         "no comparable position advance for " + (now - lastPositionAdvanceElapsedMs)
-                                + "ms · " + timelineSnapshot());
+                                + "ms · " + timelineSnapshot() + " · " + audioDeviceSnapshot());
+            }
+            if (isPlaying && playWhenReady && isLiveDynamicWindow()
+                    && !currentIsMp3
+                    && now - lastPositionAdvanceElapsedMs >= LIVE_POSITION_STALL_MS) {
+                handleLivePositionStall(now);
             }
             if (dashPlayback && lastAudioSegmentElapsedMs > 0L && lastManifestElapsedMs > 0L
                     && now - lastAudioSegmentElapsedMs >= 20000L
@@ -835,6 +868,109 @@ public final class AudioPlaybackService extends Service {
             if (timeline.isEmpty() || index < 0 || index >= timeline.getWindowCount()) return C.TIME_UNSET;
             return timeline.getWindow(index, new Timeline.Window()).windowStartTimeMs;
         } catch (Exception ignored) { return C.TIME_UNSET; }
+    }
+
+    private boolean isLiveDynamicWindow() {
+        try {
+            if (player == null) return false;
+            Timeline timeline = player.getCurrentTimeline();
+            int index = player.getCurrentMediaItemIndex();
+            if (timeline.isEmpty() || index < 0 || index >= timeline.getWindowCount()) return false;
+            Timeline.Window window = timeline.getWindow(index, new Timeline.Window());
+            return window.isLive() && window.isDynamic;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * Recovery is deliberately limited to live HLS/DASH when fresh audio media
+     * segments are still arriving but the absolute live position has stopped.
+     * It never changes the selected URL, CDN candidate, quality, or source.
+     */
+    private void handleLivePositionStall(long now) {
+        long audioAge = lastAudioSegmentElapsedMs == 0L ? Long.MAX_VALUE : now - lastAudioSegmentElapsedMs;
+        long manifestAge = lastManifestElapsedMs == 0L ? Long.MAX_VALUE : now - lastManifestElapsedMs;
+        boolean audioStillArriving = audioAge <= RECENT_AUDIO_SEGMENT_MAX_AGE_MS;
+        boolean manifestStillArriving = !dashPlayback || manifestAge <= RECENT_MANIFEST_MAX_AGE_MS;
+
+        if (!audioStillArriving || !manifestStillArriving) {
+            if (!liveStallRecoveryDisabled && liveStallRecoveryStage == 0) {
+                logDiagnostic("LIVE_STALL_NOT_RECOVERED",
+                        "position stalled but fresh stream data is not confirmed · audioAgeMs=" + audioAge
+                                + " · manifestAgeMs=" + manifestAge
+                                + " · " + timelineSnapshot() + " · " + audioDeviceSnapshot());
+                liveStallRecoveryDisabled = true;
+            }
+            return;
+        }
+
+        if (liveStallRecoveryDisabled) return;
+
+        if (liveStallRecoveryStage == 0) {
+            if (lastLiveStallRecoveryElapsedMs > 0L
+                    && now - lastLiveStallRecoveryElapsedMs < LIVE_RECOVERY_COOLDOWN_MS) return;
+
+            liveStallRecoveryStage = 1;
+            liveStallRecoveryStartedElapsedMs = now;
+            lastLiveStallRecoveryElapsedMs = now;
+            audioPositionAdvancingLogged = false;
+            logDiagnostic("LIVE_STALL_DETECTED",
+                    "live position frozen while audio segments and manifest continue · audioAgeMs=" + audioAge
+                            + " · manifestAgeMs=" + manifestAge
+                            + " · " + playbackSnapshot() + " · " + timelineSnapshot()
+                            + " · " + audioDeviceSnapshot());
+            try {
+                player.seekToDefaultPosition();
+                player.play();
+                updateNotification();
+                logDiagnostic("LIVE_STALL_RECOVERY_SEEK",
+                        "stage=1 · seekToDefaultPosition on the existing live item · "
+                                + playbackSnapshot() + " · " + timelineSnapshot());
+            } catch (Exception error) {
+                logDiagnostic("LIVE_STALL_RECOVERY_SEEK_ERROR",
+                        error.getClass().getSimpleName() + ": " + String.valueOf(error.getMessage()));
+                liveStallRecoveryStage = 2;
+                liveStallRecoveryStartedElapsedMs = now - LIVE_RECOVERY_SEEK_TIMEOUT_MS;
+            }
+            return;
+        }
+
+        if (liveStallRecoveryStage == 1
+                && now - liveStallRecoveryStartedElapsedMs >= LIVE_RECOVERY_SEEK_TIMEOUT_MS) {
+            liveStallRecoveryStage = 2;
+            liveStallRecoveryStartedElapsedMs = now;
+            audioPositionAdvancingLogged = false;
+            logDiagnostic("LIVE_STALL_RECOVERY_REPREPARE",
+                    "stage=2 · live-edge seek did not restore position; re-prepare same MediaSource"
+                            + " · " + playbackSnapshot() + " · " + timelineSnapshot());
+            try {
+                // ExoPlayer keeps the current playlist on stop(); prepare() rebuilds its
+                // renderers/loaders without resolving a different stream or CDN URL.
+                player.stop();
+                player.seekToDefaultPosition();
+                player.prepare();
+                player.play();
+                updateNotification();
+            } catch (Exception error) {
+                liveStallRecoveryDisabled = true;
+                liveStallRecoveryStage = 0;
+                logDiagnostic("LIVE_STALL_RECOVERY_REPREPARE_ERROR",
+                        error.getClass().getSimpleName() + ": " + String.valueOf(error.getMessage())
+                                + " · " + playbackSnapshot());
+            }
+            return;
+        }
+
+        if (liveStallRecoveryStage == 2
+                && now - liveStallRecoveryStartedElapsedMs >= LIVE_RECOVERY_REPREPARE_TIMEOUT_MS) {
+            liveStallRecoveryDisabled = true;
+            liveStallRecoveryStage = 0;
+            logDiagnostic("LIVE_STALL_RECOVERY_FAILED",
+                    "position did not resume after seek and same-source re-prepare; automatic recovery disabled for this play request"
+                            + " · " + playbackSnapshot() + " · " + timelineSnapshot()
+                            + " · " + audioDeviceSnapshot());
+        }
     }
 
     private String timelineSnapshot() {
