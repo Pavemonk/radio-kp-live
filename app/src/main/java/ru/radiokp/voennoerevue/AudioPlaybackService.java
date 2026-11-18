@@ -1115,7 +1115,7 @@ public final class AudioPlaybackService extends Service {
                         .append(",sink=").append(d.isSink())
                         .append(",rates=").append(java.util.Arrays.toString(d.getSampleRates()))
                         .append(",channels=").append(java.util.Arrays.toString(d.getChannelCounts()))
-                        .append(",encodings=").append(intArraySnapshot(d.getEncodings()));
+                        .append(",encodings=").append(java.util.Arrays.toString(d.getEncodings()));
             }
             result.append("]");
         }
