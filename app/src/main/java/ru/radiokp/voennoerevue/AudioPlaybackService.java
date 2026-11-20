@@ -98,7 +98,7 @@ public final class AudioPlaybackService extends Service {
     private HandlerThread diagnosticThread;
     private Handler diagnosticIoHandler;
     private static final String DIAGNOSTIC_FILE = "radio-kp-playback-diagnostics.log";
-    private static final int MAX_DIAGNOSTIC_CHARS = 60000;
+    private static final int MAX_DIAGNOSTIC_CHARS = 180000;
     private final StringBuilder playbackDiagnosticLog = new StringBuilder(16384);
     private long lastWatchdogPositionMs = -1L;
     private long lastPositionAdvanceElapsedMs = 0L;
@@ -192,6 +192,7 @@ public final class AudioPlaybackService extends Service {
         diagnosticThread.start();
         diagnosticIoHandler = new Handler(diagnosticThread.getLooper());
         loadPlaybackDiagnosticFile();
+        RadioKpApplication.record(this, "PLAYBACK_SERVICE_CREATE", deviceDiagnosticSnapshot());
         logDiagnostic("SERVICE", "diagnostic logger ready · Media3 player service created · " + deviceDiagnosticSnapshot());
         createNotificationChannel();
         trackSelector = new DefaultTrackSelector(this);
@@ -382,8 +383,14 @@ public final class AudioPlaybackService extends Service {
     @Nullable @Override public IBinder onBind(Intent intent) { return binder; }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent == null) return START_NOT_STICKY;
+        if (intent == null) {
+            RadioKpApplication.record(this, "PLAYBACK_SERVICE_START_NULL_INTENT", "flags=" + flags + " · startId=" + startId);
+            return START_NOT_STICKY;
+        }
         String action = intent.getAction();
+        RadioKpApplication.record(this, "PLAYBACK_SERVICE_START_COMMAND",
+                "action=" + String.valueOf(action) + " · flags=" + flags + " · startId=" + startId
+                        + " · " + deviceDiagnosticSnapshot());
         if (ACTION_PLAY.equals(action)) {
             audioPositionAdvancingLogged = false;
             audioPositionAdvancingCount = 0;
@@ -1281,16 +1288,33 @@ public final class AudioPlaybackService extends Service {
     private void appendDiagnosticFile(String line) {
         try {
             File file = new File(getFilesDir(), DIAGNOSTIC_FILE);
-            if (file.exists() && file.length() > 512L * 1024L) file.delete();
+            byte[] incoming = line.getBytes(StandardCharsets.UTF_8);
+            if (file.exists() && file.length() + incoming.length > MAX_DIAGNOSTIC_FILE_BYTES) {
+                ByteArrayOutputStream existing = new ByteArrayOutputStream();
+                try (FileInputStream input = new FileInputStream(file)) {
+                    byte[] buffer = new byte[8192];
+                    int read;
+                    while ((read = input.read(buffer)) != -1) existing.write(buffer, 0, read);
+                }
+                byte[] all = existing.toByteArray();
+                int keepFrom = Math.max(0, all.length - (int) (MAX_DIAGNOSTIC_FILE_BYTES * 3L / 4L));
+                while (keepFrom < all.length && all[keepFrom] != (byte) '\\n') keepFrom++;
+                if (keepFrom < all.length) keepFrom++;
+                try (FileOutputStream output = new FileOutputStream(file, false)) {
+                    output.write(all, keepFrom, all.length - keepFrom);
+                    output.flush();
+                }
+            }
             try (FileOutputStream output = openFileOutput(DIAGNOSTIC_FILE, MODE_APPEND)) {
-                output.write(line.getBytes(StandardCharsets.UTF_8));
+                output.write(incoming);
+                output.flush();
             }
         } catch (Exception ignored) { }
     }
 
     private void loadPlaybackDiagnosticFile() {
         File file = new File(getFilesDir(), DIAGNOSTIC_FILE);
-        if (!file.exists() || file.length() <= 0L || file.length() > 512L * 1024L) return;
+        if (!file.exists() || file.length() <= 0L || file.length() > MAX_DIAGNOSTIC_FILE_BYTES) return;
         try (FileInputStream input = new FileInputStream(file);
              ByteArrayOutputStream output = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[4096];
@@ -1914,7 +1938,15 @@ public final class AudioPlaybackService extends Service {
         }
     }
 
+    @Override public void onTaskRemoved(Intent rootIntent) {
+        RadioKpApplication.record(this, "PLAYBACK_SERVICE_TASK_REMOVED",
+                "launcher task removed · " + playbackSnapshot());
+        super.onTaskRemoved(rootIntent);
+    }
+
     @Override public void onDestroy() {
+        RadioKpApplication.record(this, "PLAYBACK_SERVICE_DESTROY",
+                playbackSnapshot() + " · " + audioPipelineSnapshot());
         logDiagnostic("SERVICE_DESTROY", "service being destroyed · " + playbackSnapshot()
                 + " · " + audioPipelineSnapshot() + " · " + deviceDiagnosticSnapshot());
         streamGeneration++;
