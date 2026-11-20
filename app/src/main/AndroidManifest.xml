@@ -7,8 +7,9 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
+        android:name=".RadioKpApplication"
         android:allowBackup="false"
-        android:label="Радио КП — FULL DIAGNOSTICS 0.7.42"
+        android:label="Радио КП — FULL DIAGNOSTICS 0.7.43"
         android:usesCleartextTraffic="true"
         android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
