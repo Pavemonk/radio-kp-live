@@ -110,7 +110,7 @@ public final class AudioPlaybackService extends Service {
     private long lastAudioMediaStartMs = C.TIME_UNSET;
     private long lastAudioMediaEndMs = C.TIME_UNSET;
     private boolean segmentGapLogged = false;
-    private static final long PLAYBACK_WATCHDOG_INTERVAL_MS = 2500L;
+    private static final long PLAYBACK_WATCHDOG_INTERVAL_MS = 1000L;
     private static final long LIVE_POSITION_STALL_MS = 8000L;
     // A recent decoder underrun plus a frozen live position is stronger evidence
     // of a dead audio clock than a position stall alone. Recover sooner in that case.
