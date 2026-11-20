@@ -10,8 +10,8 @@ android {
         applicationId 'ru.radiokp.voennoerevue.vkdebug'
         minSdk 23
         targetSdk 35
-        versionCode 51
-        versionName '0.7.44-fast-audio-stall-recovery'
+        versionCode 52
+        versionName '0.7.45-one-second-stall-watchdog'
     }
 }
 
