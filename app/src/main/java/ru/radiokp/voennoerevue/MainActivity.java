@@ -172,6 +172,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        RadioKpApplication.record(this, "ACTIVITY_CREATE", "savedStatePresent=" + (savedInstanceState != null));
         preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
         autoStart = preferences.getBoolean("auto_start", true);
         autoFailover = preferences.getBoolean("auto_failover", true);
@@ -2430,6 +2431,11 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     private void saveVkDebugLog() {
         String contents;
         synchronized (vkDebugLog) { contents = vkDebugLog.toString(); }
+        String processHistory = RadioKpApplication.getDiagnosticsSnapshot(this);
+        if (processHistory != null && !processHistory.trim().isEmpty()) {
+            contents = "--- PROCESS / APP LIFECYCLE DIAGNOSTICS (persisted) ---\n"
+                    + processHistory + "\n--- END PROCESS DIAGNOSTICS ---\n\n" + contents;
+        }
         String serviceHistory = playbackService == null ? "" : playbackService.getPlaybackDiagnosticSnapshot();
         if (serviceHistory != null && !serviceHistory.trim().isEmpty()) {
             contents = contents + "\n--- AUDIO SERVICE DIAGNOSTICS (persisted) ---\n" + serviceHistory;
@@ -3443,11 +3449,13 @@ public final class MainActivity extends Activity implements AudioPlaybackService
 
     @Override protected void onStart() {
         super.onStart();
+        RadioKpApplication.record(this, "ACTIVITY_START", "activity became visible");
         Intent service = new Intent(this, AudioPlaybackService.class);
         bound = bindService(service, serviceConnection, Context.BIND_AUTO_CREATE);
     }
 
     @Override protected void onStop() {
+        RadioKpApplication.record(this, "ACTIVITY_STOP", "activity no longer visible");
         if (webView != null && !streamStarted) {
             cancelSourceTimeout();
             releaseWebView();
@@ -3463,6 +3471,7 @@ public final class MainActivity extends Activity implements AudioPlaybackService
     }
 
     @Override protected void onDestroy() {
+        RadioKpApplication.record(this, "ACTIVITY_DESTROY", "changingConfigurations=" + isChangingConfigurations());
         cancelSourceTimeout();
         handler.removeCallbacks(elapsedTicker);
         releaseWebView();
