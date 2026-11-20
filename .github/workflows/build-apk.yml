@@ -1,9 +1,9 @@
-name: Build Android APK — Process and Audio Diagnostics 0.7.43
+name: Build Android APK — Fast Audio Stall Recovery 0.7.44
 # Diagnostic-only extension of 0.7.40; stream selection and recovery behavior unchanged
 
 on:
   push:
-    branches: [vk-audio-full-diagnostics-0.7.43, main, live-broadcast-duration-0.7.7, live-broadcast-duration-0.7.8, live-broadcast-progress-0.7.9, live-progress-visible-clock-0.7.10, hls-program-date-time-0.7.11, rutube-live-diagnostics-0.7.12, persistent-api-hls-diagnostics-0.7.13, hls-diagnostic-callback-fix-0.7.14, vk-live-only-selection-0.7.15, vk-live-scanner-recovery-0.7.16, vk-resolver-rollback-0.7.17, vk-live-state-filter-0.7.18, vk-live-recording-state-fix-0.7.19, vk-al-video-playerparams-probe-0.7.20, vk-native-al-video-endpoint-0.7.21, vk-full-channel-scan-and-discover-0.7.23, vk-debug-instrumentation-0.7.24, vk-debug-fix-0.7.25, vk-debug-settings-0.7.26, vk-audio-research-0.7.27, vk-dash-audio-0.7.28, rutube-audio-diagnostics-0.7.29, rutube-audio-endpoint-debug-0.7.30, vk-lowest-hls-fallback-0.7.31, vk-dash-deep-scan-0.7.32, vk-dash-stream-manifest-fix-0.7.33, vk-rutube-stream-selection-rollback-0.7.35, vk-audio-stall-diagnostics-0.7.36, vk-audio-live-window-diagnostics-0.7.37, vk-audio-save-diagnostics-txt-0.7.38, vk-save-full-debug-log-0.7.39, vk-live-audio-stall-recovery-0.7.40, vk-audio-pipeline-diagnostics-0.7.41, vk-audio-full-diagnostics-0.7.42]
+    branches: [vk-audio-full-diagnostics-0.7.43, main, live-broadcast-duration-0.7.7, live-broadcast-duration-0.7.8, live-broadcast-progress-0.7.9, live-progress-visible-clock-0.7.10, hls-program-date-time-0.7.11, rutube-live-diagnostics-0.7.12, persistent-api-hls-diagnostics-0.7.13, hls-diagnostic-callback-fix-0.7.14, vk-live-only-selection-0.7.15, vk-live-scanner-recovery-0.7.16, vk-resolver-rollback-0.7.17, vk-live-state-filter-0.7.18, vk-live-recording-state-fix-0.7.19, vk-al-video-playerparams-probe-0.7.20, vk-native-al-video-endpoint-0.7.21, vk-full-channel-scan-and-discover-0.7.23, vk-debug-instrumentation-0.7.24, vk-debug-fix-0.7.25, vk-debug-settings-0.7.26, vk-audio-research-0.7.27, vk-dash-audio-0.7.28, rutube-audio-diagnostics-0.7.29, rutube-audio-endpoint-debug-0.7.30, vk-lowest-hls-fallback-0.7.31, vk-dash-deep-scan-0.7.32, vk-dash-stream-manifest-fix-0.7.33, vk-rutube-stream-selection-rollback-0.7.35, vk-audio-stall-diagnostics-0.7.36, vk-audio-live-window-diagnostics-0.7.37, vk-audio-save-diagnostics-txt-0.7.38, vk-save-full-debug-log-0.7.39, vk-live-audio-stall-recovery-0.7.40, vk-audio-pipeline-diagnostics-0.7.41, vk-audio-full-diagnostics-0.7.42, vk-audio-fast-audio-stall-recovery-0.7.44]
   workflow_dispatch:
 
 permissions:
@@ -34,7 +34,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: radio-kp-process-audio-diagnostics-0.7.43
+          name: radio-kp-fast-audio-stall-recovery-0.7.44
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
