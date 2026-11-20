@@ -1298,7 +1298,7 @@ public final class AudioPlaybackService extends Service {
                 }
                 byte[] all = existing.toByteArray();
                 int keepFrom = Math.max(0, all.length - (int) (MAX_DIAGNOSTIC_FILE_BYTES * 3L / 4L));
-                while (keepFrom < all.length && all[keepFrom] != (byte) '\\n') keepFrom++;
+                while (keepFrom < all.length && all[keepFrom] != (byte) '\n') keepFrom++;
                 if (keepFrom < all.length) keepFrom++;
                 try (FileOutputStream output = new FileOutputStream(file, false)) {
                     output.write(all, keepFrom, all.length - keepFrom);
