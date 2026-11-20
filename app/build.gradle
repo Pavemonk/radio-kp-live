@@ -10,8 +10,8 @@ android {
         applicationId 'ru.radiokp.voennoerevue.vkdebug'
         minSdk 23
         targetSdk 35
-        versionCode 52
-        versionName '0.7.45-one-second-stall-watchdog'
+        versionCode 53
+        versionName '0.7.46-500ms-pcm-buffer'
     }
 }
 
