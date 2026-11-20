@@ -30,6 +30,9 @@ import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.Timeline;
 import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.DefaultRenderersFactory;
+import androidx.media3.exoplayer.audio.DefaultAudioSink;
+import androidx.media3.exoplayer.audio.DefaultAudioTrackBufferSizeProvider;
 import androidx.media3.exoplayer.DecoderCounters;
 import androidx.media3.exoplayer.audio.AudioSink;
 import androidx.media3.exoplayer.analytics.AnalyticsListener;
@@ -111,6 +114,8 @@ public final class AudioPlaybackService extends Service {
     private long lastAudioMediaEndMs = C.TIME_UNSET;
     private boolean segmentGapLogged = false;
     private static final long PLAYBACK_WATCHDOG_INTERVAL_MS = 1000L;
+    private static final int PCM_BUFFER_MIN_DURATION_US = 500_000;
+    private static final int PCM_BUFFER_MAX_DURATION_US = 1_500_000;
     private static final long LIVE_POSITION_STALL_MS = 8000L;
     // A recent decoder underrun plus a frozen live position is stronger evidence
     // of a dead audio clock than a position stall alone. Recover sooner in that case.
@@ -206,6 +211,24 @@ public final class AudioPlaybackService extends Service {
         }
     };
 
+    private static final class BufferedAudioRenderersFactory extends DefaultRenderersFactory {
+        BufferedAudioRenderersFactory(Context context) { super(context); }
+        @Override protected AudioSink buildAudioSink(Context context, boolean enableFloatOutput,
+                boolean enableAudioTrackPlaybackParams) {
+            DefaultAudioTrackBufferSizeProvider bufferProvider =
+                    new DefaultAudioTrackBufferSizeProvider.Builder()
+                            .setMinPcmBufferDurationUs(PCM_BUFFER_MIN_DURATION_US)
+                            .setMaxPcmBufferDurationUs(PCM_BUFFER_MAX_DURATION_US)
+                            .build();
+            return new DefaultAudioSink.Builder(context)
+                    .setEnableFloatOutput(enableFloatOutput)
+                    .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                    .setAudioTrackBufferSizeProvider(bufferProvider)
+                    .build();
+        }
+    }
+
+
     @Override public void onCreate() {
         super.onCreate();
         diagnosticThread = new HandlerThread("RadioKp-Diagnostics");
@@ -217,7 +240,7 @@ public final class AudioPlaybackService extends Service {
         createNotificationChannel();
         trackSelector = new DefaultTrackSelector(this);
         applyTrackSelectionParameters();
-        player = new ExoPlayer.Builder(this)
+        player = new ExoPlayer.Builder(this, new BufferedAudioRenderersFactory(this))
                 .setTrackSelector(trackSelector)
                 .setWakeMode(C.WAKE_MODE_NETWORK)
                 .build();
