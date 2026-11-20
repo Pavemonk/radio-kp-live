@@ -112,6 +112,10 @@ public final class AudioPlaybackService extends Service {
     private boolean segmentGapLogged = false;
     private static final long PLAYBACK_WATCHDOG_INTERVAL_MS = 2500L;
     private static final long LIVE_POSITION_STALL_MS = 8000L;
+    // A recent decoder underrun plus a frozen live position is stronger evidence
+    // of a dead audio clock than a position stall alone. Recover sooner in that case.
+    private static final long LIVE_POSITION_STALL_AFTER_UNDERRUN_MS = 3000L;
+    private static final long RECENT_AUDIO_UNDERRUN_MAX_AGE_MS = 20000L;
     private static final long LIVE_RECOVERY_SEEK_TIMEOUT_MS = 10000L;
     private static final long LIVE_RECOVERY_REPREPARE_TIMEOUT_MS = 15000L;
     private static final long LIVE_RECOVERY_COOLDOWN_MS = 60000L;
@@ -136,6 +140,22 @@ public final class AudioPlaybackService extends Service {
     private String lastAudioInputFormat = "unknown";
     private String lastAudioTrackConfig = "not initialized";
     private String lastDecoderCountersSnapshot = "decoderCounters=not yet reported";
+    private DecoderCounters activeAudioDecoderCounters;
+    private long lastAudioUnderrunElapsedMs = 0L;
+    private long lastAudioUnderrunBufferSizeMs = -1L;
+    private long lastAudioUnderrunElapsedSinceLastFeedMs = -1L;
+    private long lastAudioUnderrunEventPositionMs = C.TIME_UNSET;
+    private int audioUnderrunCount = 0;
+    private boolean audioUnderrunFastRecoveryTriggered = false;
+    // These IDs describe callback order, not Android's private AudioTrack object identity.
+    private int audioTrackLifecycleSequence = 0;
+    private int activeAudioTrackInstance = 0;
+    private int lastReleasedAudioTrackInstance = 0;
+    private boolean audioTrackReportedActive = false;
+    private long lastAudioTrackInitializedElapsedMs = -1L;
+    private long lastAudioTrackReleasedElapsedMs = -1L;
+    private long lastAudioPositionAdvancingElapsedMs = -1L;
+    private boolean audioPositionAdvancingAfterTrackRelease = false;
     private long diagnosticEventSequence = 0L;
     private long diagnosticSessionStartedElapsedMs = 0L;
     private static final long MAX_DIAGNOSTIC_FILE_BYTES = 1024L * 1024L;
@@ -287,6 +307,7 @@ public final class AudioPlaybackService extends Service {
 
             @Override public void onAudioEnabled(EventTime eventTime, DecoderCounters decoderCounters) {
                 audioRendererEnabled = true;
+                activeAudioDecoderCounters = decoderCounters;
                 lastDecoderCountersSnapshot = decoderCountersSnapshot(decoderCounters);
                 logDiagnostic("AUDIO_RENDERER_ENABLED",
                         lastDecoderCountersSnapshot + " · " + audioPipelineSnapshot());
@@ -295,6 +316,7 @@ public final class AudioPlaybackService extends Service {
             @Override public void onAudioDisabled(EventTime eventTime, DecoderCounters decoderCounters) {
                 audioRendererEnabled = false;
                 lastDecoderCountersSnapshot = decoderCountersSnapshot(decoderCounters);
+                activeAudioDecoderCounters = null;
                 logDiagnostic("AUDIO_RENDERER_DISABLED",
                         lastDecoderCountersSnapshot + " · " + audioPipelineSnapshot());
             }
@@ -320,17 +342,35 @@ public final class AudioPlaybackService extends Service {
 
             @Override public void onAudioTrackInitialized(EventTime eventTime,
                     AudioSink.AudioTrackConfig audioTrackConfig) {
+                boolean previousTrackStillMarkedActive = audioTrackReportedActive;
+                int trackInstance = ++audioTrackLifecycleSequence;
+                activeAudioTrackInstance = trackInstance;
+                audioTrackReportedActive = true;
+                lastAudioTrackInitializedElapsedMs = SystemClock.elapsedRealtime();
                 lastAudioTrackConfig = audioTrackConfigSnapshot(audioTrackConfig);
+                audioPositionAdvancingAfterTrackRelease = false;
                 logDiagnostic("AUDIO_TRACK_INITIALIZED",
-                        lastAudioTrackConfig + " · " + audioPipelineSnapshot());
+                        "trackInstance=" + trackInstance
+                                + " · previousTrackStillMarkedActive=" + previousTrackStillMarkedActive
+                                + " · " + analyticsEventTimeSnapshot(eventTime)
+                                + " · " + lastAudioTrackConfig + " · " + audioPipelineSnapshot());
             }
 
             @Override public void onAudioTrackReleased(EventTime eventTime,
                     AudioSink.AudioTrackConfig audioTrackConfig) {
                 String releasedConfig = audioTrackConfigSnapshot(audioTrackConfig);
-                logDiagnostic("AUDIO_TRACK_RELEASED",
-                        releasedConfig + " · " + audioPipelineSnapshot());
+                boolean hadActiveTrack = audioTrackReportedActive;
+                int releasedInstance = activeAudioTrackInstance;
+                if (hadActiveTrack) lastReleasedAudioTrackInstance = releasedInstance;
+                audioTrackReportedActive = false;
+                activeAudioTrackInstance = 0;
+                lastAudioTrackReleasedElapsedMs = SystemClock.elapsedRealtime();
                 lastAudioTrackConfig = "released: " + releasedConfig;
+                logDiagnostic("AUDIO_TRACK_RELEASED",
+                        "trackInstance=" + (hadActiveTrack ? releasedInstance : "unknown")
+                                + " · hadActiveTrack=" + hadActiveTrack
+                                + " · " + analyticsEventTimeSnapshot(eventTime)
+                                + " · " + releasedConfig + " · " + audioPipelineSnapshot());
             }
 
             @Override public void onAudioSessionIdChanged(EventTime eventTime, int audioSessionId) {
@@ -341,9 +381,17 @@ public final class AudioPlaybackService extends Service {
 
             @Override public void onAudioUnderrun(EventTime eventTime, int bufferSize, long bufferSizeMs,
                                                   long elapsedSinceLastFeedMs) {
-                logDiagnostic("AUDIO_UNDERRUN", "bufferBytes=" + bufferSize + " · bufferMs=" + bufferSizeMs
+                lastAudioUnderrunElapsedMs = SystemClock.elapsedRealtime();
+                lastAudioUnderrunBufferSizeMs = bufferSizeMs;
+                lastAudioUnderrunElapsedSinceLastFeedMs = elapsedSinceLastFeedMs;
+                lastAudioUnderrunEventPositionMs = eventTime == null
+                        ? C.TIME_UNSET : eventTime.eventPlaybackPositionMs;
+                audioUnderrunCount++;
+                audioUnderrunFastRecoveryTriggered = false;
+                logDiagnostic("AUDIO_UNDERRUN", "count=" + audioUnderrunCount
+                        + " · bufferBytes=" + bufferSize + " · bufferMs=" + bufferSizeMs
                         + " · elapsedSinceLastFeedMs=" + elapsedSinceLastFeedMs
-                        + " · eventPositionMs=" + eventTime.eventPlaybackPositionMs
+                        + " · " + analyticsEventTimeSnapshot(eventTime)
                         + " · sessionElapsedMs=" + (SystemClock.elapsedRealtime() - diagnosticSessionStartedElapsedMs)
                         + " · " + playbackSnapshot() + " · " + audioPipelineSnapshot());
             }
@@ -372,9 +420,16 @@ public final class AudioPlaybackService extends Service {
             @Override public void onAudioPositionAdvancing(EventTime eventTime, long playoutStartSystemTimeMs) {
                 audioPositionAdvancingLogged = true;
                 audioPositionAdvancingCount++;
-                logDiagnostic("AUDIO_OUTPUT_POSITION_ADVANCING",
+                lastAudioPositionAdvancingElapsedMs = SystemClock.elapsedRealtime();
+                audioPositionAdvancingAfterTrackRelease = !audioTrackReportedActive;
+                logDiagnostic(audioPositionAdvancingAfterTrackRelease
+                                ? "AUDIO_POSITION_ADVANCING_WITH_NO_ACTIVE_TRACK"
+                                : "AUDIO_OUTPUT_POSITION_ADVANCING",
                         "count=" + audioPositionAdvancingCount
                                 + " · playoutStartSystemTimeMs=" + playoutStartSystemTimeMs
+                                + " · activeTrackInstance=" + activeAudioTrackInstance
+                                + " · lastReleasedTrackInstance=" + lastReleasedAudioTrackInstance
+                                + " · " + analyticsEventTimeSnapshot(eventTime)
                                 + " · " + audioPipelineSnapshot());
             }
         });
@@ -395,6 +450,20 @@ public final class AudioPlaybackService extends Service {
             audioPositionAdvancingLogged = false;
             audioPositionAdvancingCount = 0;
             audioRendererEnabled = false;
+            activeAudioDecoderCounters = null;
+            lastAudioUnderrunElapsedMs = 0L;
+            lastAudioUnderrunBufferSizeMs = -1L;
+            lastAudioUnderrunElapsedSinceLastFeedMs = -1L;
+            lastAudioUnderrunEventPositionMs = C.TIME_UNSET;
+            audioUnderrunCount = 0;
+            audioUnderrunFastRecoveryTriggered = false;
+            activeAudioTrackInstance = 0;
+            lastReleasedAudioTrackInstance = 0;
+            audioTrackReportedActive = false;
+            lastAudioTrackInitializedElapsedMs = -1L;
+            lastAudioTrackReleasedElapsedMs = -1L;
+            lastAudioPositionAdvancingElapsedMs = -1L;
+            audioPositionAdvancingAfterTrackRelease = false;
             lastAudioDecoderName = "unknown";
             lastAudioDecoderInitDurationMs = -1L;
             lastAudioDecoderInitializedElapsedMs = -1L;
@@ -903,6 +972,7 @@ public final class AudioPlaybackService extends Service {
                 lastWatchdogPositionMs = position;
                 lastPositionAdvanceElapsedMs = now;
                 positionStallReported = false;
+                audioUnderrunFastRecoveryTriggered = false;
             } else if (windowStart == C.TIME_UNSET && position < lastWatchdogPositionMs - 1500L) {
                 logDiagnostic("WATCHDOG_WINDOW_REBASE", "raw position moved backwards; reset baseline"
                         + " · previous=" + lastWatchdogPositionMs + " · current=" + position
@@ -912,17 +982,49 @@ public final class AudioPlaybackService extends Service {
                 lastWindowStartMs = windowStart;
                 lastPositionAdvanceElapsedMs = now;
                 positionStallReported = false;
-            } else if (isPlaying && !positionStallReported
-                    && now - lastPositionAdvanceElapsedMs >= LIVE_POSITION_STALL_MS) {
-                positionStallReported = true;
-                logDiagnostic("WATCHDOG_POSITION_STALLED",
-                        "no comparable position advance for " + (now - lastPositionAdvanceElapsedMs)
-                                + "ms · " + timelineSnapshot() + " · " + audioDeviceSnapshot());
-            }
-            if (isPlaying && playWhenReady && isLiveDynamicWindow()
-                    && !currentIsMp3
-                    && now - lastPositionAdvanceElapsedMs >= LIVE_POSITION_STALL_MS) {
-                handleLivePositionStall(now);
+            } else {
+                long stalledForMs = now - lastPositionAdvanceElapsedMs;
+                boolean recentAudioUnderrun = lastAudioUnderrunElapsedMs > 0L
+                        && now - lastAudioUnderrunElapsedMs <= RECENT_AUDIO_UNDERRUN_MAX_AGE_MS;
+                long stallThresholdMs = recentAudioUnderrun
+                        ? LIVE_POSITION_STALL_AFTER_UNDERRUN_MS : LIVE_POSITION_STALL_MS;
+
+                if (isPlaying && !positionStallReported && stalledForMs >= stallThresholdMs) {
+                    positionStallReported = true;
+                    if (recentAudioUnderrun) {
+                        logDiagnostic("AUDIO_UNDERRUN_POSITION_STALL",
+                                "position stopped after recent audio underrun"
+                                        + " · stalledForMs=" + stalledForMs
+                                        + " · stallThresholdMs=" + stallThresholdMs
+                                        + " · underrunAgeMs=" + (now - lastAudioUnderrunElapsedMs)
+                                        + " · underrunBufferMs=" + lastAudioUnderrunBufferSizeMs
+                                        + " · underrunElapsedSinceFeedMs=" + lastAudioUnderrunElapsedSinceLastFeedMs
+                                        + " · underrunEventPositionMs=" + lastAudioUnderrunEventPositionMs
+                                        + " · " + audioDeviceSnapshot()
+                                        + " · " + audioPipelineSnapshot());
+                    }
+                    logDiagnostic("WATCHDOG_POSITION_STALLED",
+                            "no comparable position advance for " + stalledForMs
+                                    + "ms · thresholdMs=" + stallThresholdMs
+                                    + " · recentAudioUnderrun=" + recentAudioUnderrun
+                                    + " · " + timelineSnapshot() + " · " + audioDeviceSnapshot());
+                }
+
+                if (isPlaying && playWhenReady && isLiveDynamicWindow()
+                        && !currentIsMp3 && stalledForMs >= stallThresholdMs) {
+                    if (recentAudioUnderrun && !audioUnderrunFastRecoveryTriggered) {
+                        audioUnderrunFastRecoveryTriggered = true;
+                        logDiagnostic("AUDIO_STALL_FAST_RECOVERY",
+                                "trigger=recent_audio_underrun_plus_frozen_live_position"
+                                        + " · stalledForMs=" + stalledForMs
+                                        + " · stallThresholdMs=" + stallThresholdMs
+                                        + " · underrunAgeMs=" + (now - lastAudioUnderrunElapsedMs)
+                                        + " · musicActive=" + (audioManager != null && audioManager.isMusicActive())
+                                        + " · " + playbackSnapshot() + " · " + timelineSnapshot()
+                                        + " · " + audioPipelineSnapshot());
+                    }
+                    handleLivePositionStall(now);
+                }
             }
             if (dashPlayback && lastAudioSegmentElapsedMs > 0L && lastManifestElapsedMs > 0L
                     && now - lastAudioSegmentElapsedMs >= 20000L
@@ -1129,6 +1231,16 @@ public final class AudioPlaybackService extends Service {
         return result.toString();
     }
 
+    private String analyticsEventTimeSnapshot(AnalyticsListener.EventTime eventTime) {
+        if (eventTime == null) return "analyticsEventTime=null";
+        return "eventRealtimeMs=" + eventTime.realtimeMs
+                + " · eventPositionMs=" + eventTime.eventPlaybackPositionMs
+                + " · currentPlaybackPositionMs=" + eventTime.currentPlaybackPositionMs
+                + " · totalBufferedDurationMs=" + eventTime.totalBufferedDurationMs
+                + " · eventWindowIndex=" + eventTime.windowIndex
+                + " · currentWindowIndex=" + eventTime.currentWindowIndex;
+    }
+
     private String audioTrackConfigSnapshot(AudioSink.AudioTrackConfig config) {
         if (config == null) return "AudioTrackConfig=null";
         return "encoding=" + config.encoding + " · sampleRate=" + config.sampleRate
@@ -1139,8 +1251,7 @@ public final class AudioPlaybackService extends Service {
     private String decoderCountersSnapshot(DecoderCounters counters) {
         if (counters == null) return "decoderCounters=null";
         try {
-            java.lang.reflect.Method ensureUpdated = counters.getClass().getMethod("ensureUpdated");
-            ensureUpdated.invoke(counters);
+            counters.ensureUpdated();
         } catch (Exception ignored) { }
         StringBuilder result = new StringBuilder("decoderCounters{");
         String[] names = {"decoderInitCount", "decoderReleaseCount", "queuedInputBufferCount",
@@ -1161,14 +1272,39 @@ public final class AudioPlaybackService extends Service {
     }
 
     private String audioPipelineSnapshot() {
+        long now = SystemClock.elapsedRealtime();
         long decoderAge = lastAudioDecoderInitializedElapsedMs <= 0L
-                ? -1L : SystemClock.elapsedRealtime() - lastAudioDecoderInitializedElapsedMs;
+                ? -1L : now - lastAudioDecoderInitializedElapsedMs;
+        long trackInitAge = lastAudioTrackInitializedElapsedMs <= 0L
+                ? -1L : now - lastAudioTrackInitializedElapsedMs;
+        long trackReleaseAge = lastAudioTrackReleasedElapsedMs <= 0L
+                ? -1L : now - lastAudioTrackReleasedElapsedMs;
+        long positionAdvancingAge = lastAudioPositionAdvancingElapsedMs <= 0L
+                ? -1L : now - lastAudioPositionAdvancingElapsedMs;
+        if (activeAudioDecoderCounters != null) {
+            lastDecoderCountersSnapshot = decoderCountersSnapshot(activeAudioDecoderCounters);
+        }
+        String trackState = audioTrackReportedActive ? "ACTIVE" : "NO_ACTIVE_TRACK_REPORTED";
+        String underrunAge = lastAudioUnderrunElapsedMs <= 0L
+                ? "none" : String.valueOf(now - lastAudioUnderrunElapsedMs);
         return "rendererEnabled=" + audioRendererEnabled
                 + " · decoder=" + lastAudioDecoderName
                 + " · decoderInitDurationMs=" + lastAudioDecoderInitDurationMs
                 + " · decoderAgeMs=" + decoderAge
                 + " · audioSessionId=" + lastAudioSessionId
-                + " · audioTrack={" + lastAudioTrackConfig + "}"
+                + " · audioTrackState=" + trackState
+                + " · activeAudioTrackInstance=" + activeAudioTrackInstance
+                + " · lastReleasedAudioTrackInstance=" + lastReleasedAudioTrackInstance
+                + " · audioTrackLifecycleSequence=" + audioTrackLifecycleSequence
+                + " · audioTrackInitAgeMs=" + trackInitAge
+                + " · audioTrackReleaseAgeMs=" + trackReleaseAge
+                + " · audioTrackConfig={" + lastAudioTrackConfig + "}"
+                + " · audioPositionAdvancingAfterTrackRelease=" + audioPositionAdvancingAfterTrackRelease
+                + " · audioPositionAdvancingAgeMs=" + positionAdvancingAge
+                + " · audioUnderrunCount=" + audioUnderrunCount
+                + " · lastAudioUnderrunAgeMs=" + underrunAge
+                + " · lastAudioUnderrunBufferMs=" + lastAudioUnderrunBufferSizeMs
+                + " · lastAudioUnderrunElapsedSinceFeedMs=" + lastAudioUnderrunElapsedSinceLastFeedMs
                 + " · inputFormat={" + lastAudioInputFormat + "}"
                 + " · positionAdvancingCount=" + audioPositionAdvancingCount
                 + " · decoderCounters={" + lastDecoderCountersSnapshot + "}"
